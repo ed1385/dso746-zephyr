@@ -1,0 +1,55 @@
+/*
+ * DSO-746 board overlay.
+ *
+ * TIM2, TIM3, ADC1, ADC3 and DMA2 are driven directly through the LL headers,
+ * so the matching Zephyr drivers are kept OUT of the way: if the Zephyr DMA
+ * driver owned DMA2 it would install its own handlers on the same streams
+ * and the two would fight over the interrupt.
+ */
+
+/ {
+	chosen {
+		zephyr,display = &ltdc;
+		zephyr,touch = &ft5336;
+	};
+
+	lvgl_pointer {
+		compatible = "zephyr,lvgl-pointer-input";
+		input = <&ft5336>;
+	};
+};
+
+/* The board devicetree enables TIM3 as a PWM provider. The generator needs
+ * DMA into CCR1, which the Zephyr PWM API cannot express, so we take it over. */
+&timers3 {
+	status = "disabled";
+};
+
+/* Left disabled on purpose - see the comment at the top. */
+&dma2 {
+	status = "disabled";
+};
+
+&ltdc {
+	status = "okay";
+};
+
+/*
+ * Chrom-ART (DMA2D). The F7 devicetree does not declare it, but LVGL's DMA2D
+ * draw unit connects its interrupt through this node label, so it is declared
+ * here. Base address 0x4002B000 and interrupt line 90 come from RM0385.
+ */
+/ {
+	soc {
+		dma2d: dma@4002b000 {
+			compatible = "st,stm32-dma2d";
+			reg = <0x4002b000 0x1000>;
+			interrupts = <90 0>;
+			status = "okay";
+		};
+	};
+};
+
+&i2c1 {
+	status = "okay";
+};
