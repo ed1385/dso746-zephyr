@@ -296,6 +296,29 @@ static uint32_t last_frame_ms;
 static lv_style_t st_key, st_key_on, st_key_pr, st_vb;
 static lv_style_transition_dsc_t tr_ignite, tr_decay;
 
+enum popup_page { PG_NONE, PG_PARAMS, PG_LIST, PG_ADJUST, PG_KEYPAD };
+
+/*
+ * NUMERIC KEYPAD for frequencies (spec §4.2, instrument convention):
+ * digits build the number in the value block, a unit key (Hz / kHz / MHz)
+ * is the multiplier AND the apply: the value is validated against the
+ * parameter's range, applied, and the panel folds back so the result is
+ * visible; - / + then fine-tune it. 5 x 3 tiles of 56 x 46 px, gaps 11.
+ *   1 2 3 <- Hz
+ *   4 5 6  . kHz
+ *   7 8 9  0 MHz
+ */
+#define KP_N 15
+static lv_obj_t *kpad, *ktile[KP_N], *klab[KP_N];
+static const char *const kp_lab[KP_N] = {
+	"1", "2", "3", "DEL", "Hz",
+	"4", "5", "6", ".",   "kHz",
+	"7", "8", "9", "0",   "MHz",
+};
+static char kbuf[10];
+static enum popup_page page = PG_NONE;
+
+
 /* ---- drawing buffers (SDRAM: 129 + 126 = 255 KB of the 8 MB) ------------ */
 static uint16_t cbuf[WAVE_W * WAVE_H] SDRAM_SECTION __aligned(32);
 static uint8_t  phos[N_CH][WAVE_W * WAVE_H] SDRAM_SECTION;
@@ -997,6 +1020,14 @@ static void refresh_bar(void)
 	char t[32];
 
 	set_text(lbl_par, uc.par, sizeof(uc.par), p->label);
+	if (page == PG_KEYPAD) {
+		snprintf(t, sizeof(t), "%s_", kbuf);
+		set_text(lbl_val, uc.val, sizeof(uc.val), t);
+		snprintf(t, sizeof(t), "%.0f Hz .. %.0f kHz  unit = apply",
+			 (double)p->min, (double)(p->max / 1000.0f));
+		set_text(lbl_sub, uc.sub, sizeof(uc.sub), t);
+		return;
+	}
 	param_text(p, t, sizeof(t));
 	set_text(lbl_val, uc.val, sizeof(uc.val), t);
 
@@ -1032,8 +1063,7 @@ static void apply_now(void);
 static void scope_defaults(void);
 
 /* ---- settings popup (spec §4.2) ----------------------------------------- */
-enum popup_page { PG_NONE, PG_PARAMS, PG_LIST, PG_ADJUST };
-static enum popup_page page = PG_NONE;
+
 static uint32_t last_touch_ms;
 static bool demo_toggle_req;
 static bool frozen_valid;
@@ -1083,6 +1113,7 @@ static void popup_refresh(void)
 			tile_style(i, i == sel_param, g->color);
 		}
 		lv_label_set_text_static(tile_val[TILE_DONE], "BACK");
+
 	} else if (page == PG_LIST) {
 		const struct param *p = &g->p[sel_param];
 		uint8_t cur = p->field ? *(uint8_t *)p->field : 0;
@@ -1096,21 +1127,81 @@ static void popup_refresh(void)
 			tile_style(i, i == cur, g->color);
 		}
 		lv_label_set_text_static(tile_val[TILE_DONE], "BACK");
+
 	}
 }
 
 static void popup_set_page(enum popup_page pg)
 {
 	page = pg;
-	popup_open = (pg == PG_PARAMS || pg == PG_LIST);
+	popup_open = (pg == PG_PARAMS || pg == PG_LIST || pg == PG_KEYPAD);
 	memset(tile_cache, 0, sizeof(tile_cache));
-	if (popup_open) {
+	if (pg == PG_KEYPAD) {
+		kbuf[0] = '\0';
+		lv_obj_add_flag(popup, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_remove_flag(kpad, LV_OBJ_FLAG_HIDDEN);
+	} else if (popup_open) {
+		lv_obj_add_flag(kpad, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_remove_flag(popup, LV_OBJ_FLAG_HIDDEN);
 		popup_refresh();
 	} else {
+		lv_obj_add_flag(kpad, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_add_flag(popup, LV_OBJ_FLAG_HIDDEN);
 		lv_obj_invalidate(canvas);      /* the trace comes back at once */
 	}
+}
+
+static void kpad_cb(lv_event_t *e)
+{
+	int i = (int)(intptr_t)lv_event_get_user_data(e);
+	const char *k = kp_lab[i];
+	size_t len = strlen(kbuf);
+
+	last_touch_ms = k_uptime_get_32();
+
+	if (strcmp(k, "DEL") == 0) {
+		if (len) {
+			kbuf[len - 1] = '\0';
+		}
+		refresh_bar();
+		return;
+	}
+	if (strcmp(k, ".") == 0) {
+		if (len && len < sizeof(kbuf) - 1 && !strchr(kbuf, '.')) {
+			kbuf[len] = '.';
+			kbuf[len + 1] = '\0';
+		}
+		refresh_bar();
+		return;
+	}
+	if (k[0] >= '0' && k[0] <= '9') {
+		if (len < 7) {                      /* 7 chars: 1234.56 fits */
+			kbuf[len] = k[0];
+			kbuf[len + 1] = '\0';
+		}
+		refresh_bar();
+		return;
+	}
+
+	/* unit key = multiplier + apply */
+	float mult = (strcmp(k, "MHz") == 0) ? 1e6f : (strcmp(k, "kHz") == 0) ? 1e3f : 1.0f;
+
+	if (len == 0 || strcmp(kbuf, ".") == 0) {
+		return;                             /* nothing typed: ignore */
+	}
+	float v = strtof(kbuf, NULL) * mult;
+	const struct param *p = &groups[cfg.mode][sel_group].p[sel_param];
+
+	ui_lock();
+	if (p->type == P_FLOAT && p->field) {
+		*(float *)p->field = v;
+	}
+	validate_cfg(p);          /* clamps to the parameter's and hardware range */
+	ui_unlock();
+	apply_now();
+	popup_set_page(PG_ADJUST);            /* back to the trace; - / + fine-tune */
+	refresh_keys();
+	refresh_bar();
 }
 
 static void tile_cb(lv_event_t *e)
@@ -1169,6 +1260,10 @@ static void tile_cb(lv_event_t *e)
 		popup_set_page(PG_NONE);        /* result must be visible */
 		break;
 	default:
+		if (p->type == P_FLOAT && p->fmt == F_HZ) {
+			popup_set_page(PG_KEYPAD);  /* frequencies are typed */
+			break;
+		}
 		/* STEP: collapse so the trace is visible while - / + and drag
 		 * change the value (spec §1.1); the group key reopens the page */
 		popup_set_page(PG_ADJUST);
@@ -1643,10 +1738,79 @@ int ui_init(void)
 	}
 	lv_label_set_text_static(tile_lab[TILE_DONE], "");
 	lv_label_set_text_static(tile_val[TILE_DONE], "BACK");
+
+	kpad = panel(scr, WAVE_X, WAVE_Y, WAVE_W, WAVE_H, C_GND2);
+	lv_obj_set_style_border_color(kpad, lv_color_hex(C_LINE), 0);
+	lv_obj_set_style_border_width(kpad, 1, 0);
+	for (int i = 0; i < KP_N; i++) {
+		int x = 6 + (i % 5) * (56 + 11);
+		int y = 16 + (i / 5) * (46 + 11);
+		bool unit = (i % 5 == 4);
+
+		ktile[i] = panel(kpad, x, y, 56, 46, C_BTN);
+		lv_obj_add_style(ktile[i], &st_key, 0);
+		lv_obj_add_style(ktile[i], &st_key_pr, LV_STATE_PRESSED);
+		lv_obj_add_flag(ktile[i], LV_OBJ_FLAG_CLICKABLE);
+		lv_obj_add_event_cb(ktile[i], kpad_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+		klab[i] = label(ktile[i], 0, 14, 56, &lv_font_montserrat_14,
+				unit ? C_RUN : C_TXT, LV_TEXT_ALIGN_CENTER);
+		lv_label_set_text_static(klab[i], kp_lab[i]);
+		if (unit) {
+			lv_obj_set_style_outline_color(ktile[i], lv_color_hex(C_RUN), 0);
+			lv_obj_set_style_outline_opa(ktile[i], LV_OPA_50, 0);
+		}
+	}
+	lv_obj_add_flag(kpad, LV_OBJ_FLAG_HIDDEN);
 	lv_obj_set_style_text_color(tile_val[TILE_DONE], lv_color_hex(C_RUN), 0);
 	lv_obj_set_style_text_align(tile_val[TILE_DONE], LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_set_pos(tile_val[TILE_DONE], 6, 15);
 	lv_obj_add_flag(popup, LV_OBJ_FLAG_HIDDEN);
+
+	kpad = panel(scr, WAVE_X, WAVE_Y, WAVE_W, WAVE_H, C_GND2);
+	lv_obj_set_style_border_color(kpad, lv_color_hex(C_LINE), 0);
+	lv_obj_set_style_border_width(kpad, 1, 0);
+	for (int i = 0; i < KP_N; i++) {
+		int x = 6 + (i % 5) * (56 + 11);
+		int y = 16 + (i / 5) * (46 + 11);
+		bool unit = (i % 5 == 4);
+
+		ktile[i] = panel(kpad, x, y, 56, 46, C_BTN);
+		lv_obj_add_style(ktile[i], &st_key, 0);
+		lv_obj_add_style(ktile[i], &st_key_pr, LV_STATE_PRESSED);
+		lv_obj_add_flag(ktile[i], LV_OBJ_FLAG_CLICKABLE);
+		lv_obj_add_event_cb(ktile[i], kpad_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+		klab[i] = label(ktile[i], 0, 14, 56, &lv_font_montserrat_14,
+				unit ? C_RUN : C_TXT, LV_TEXT_ALIGN_CENTER);
+		lv_label_set_text_static(klab[i], kp_lab[i]);
+		if (unit) {
+			lv_obj_set_style_outline_color(ktile[i], lv_color_hex(C_RUN), 0);
+			lv_obj_set_style_outline_opa(ktile[i], LV_OPA_50, 0);
+		}
+	}
+	lv_obj_add_flag(kpad, LV_OBJ_FLAG_HIDDEN);
+
+	kpad = panel(scr, WAVE_X, WAVE_Y, WAVE_W, WAVE_H, C_GND2);
+	lv_obj_set_style_border_color(kpad, lv_color_hex(C_LINE), 0);
+	lv_obj_set_style_border_width(kpad, 1, 0);
+	for (int i = 0; i < KP_N; i++) {
+		int x = 6 + (i % 5) * (56 + 11);
+		int y = 16 + (i / 5) * (46 + 11);
+		bool unit = (i % 5 == 4);
+
+		ktile[i] = panel(kpad, x, y, 56, 46, C_BTN);
+		lv_obj_add_style(ktile[i], &st_key, 0);
+		lv_obj_add_style(ktile[i], &st_key_pr, LV_STATE_PRESSED);
+		lv_obj_add_flag(ktile[i], LV_OBJ_FLAG_CLICKABLE);
+		lv_obj_add_event_cb(ktile[i], kpad_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+		klab[i] = label(ktile[i], 0, 14, 56, &lv_font_montserrat_14,
+				unit ? C_RUN : C_TXT, LV_TEXT_ALIGN_CENTER);
+		lv_label_set_text_static(klab[i], kp_lab[i]);
+		if (unit) {
+			lv_obj_set_style_outline_color(ktile[i], lv_color_hex(C_RUN), 0);
+			lv_obj_set_style_outline_opa(ktile[i], LV_OPA_50, 0);
+		}
+	}
+	lv_obj_add_flag(kpad, LV_OBJ_FLAG_HIDDEN);
 
 	/* rail */
 	panel(scr, 336, 22, 144, 250, C_GND2);

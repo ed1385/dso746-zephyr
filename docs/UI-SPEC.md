@@ -101,6 +101,13 @@ Group key selects the group; the value block cycles the group's parameters;
      block shows the parameter; − / + and drag on the trace adjust it with
      the trace updating live. The group key stays lit; tapping it reopens the
      parameter page.
+   - `STEP` with a frequency (FREQUENCY, PWM FREQ) → a **numeric keypad**
+     page: 5×3 tiles 56×46 — digits, decimal point, DEL, and the unit keys
+     Hz / kHz / MHz. The typed number shows in the value block. A unit key is
+     the multiplier and the apply: the value is validated against the
+     parameter's range and the hardware limits (clamped, never refused),
+     applied, and the panel folds back to the trace with − / + fine-tuning.
+     Nothing typed → the unit key does nothing.
    - `TOGGLE` → flips immediately, popup stays.
    - `ACTION` → runs immediately, popup closes so the result is visible.
 3. **Drag on the trace** (live mode, any popup closed): vertical drag moves
