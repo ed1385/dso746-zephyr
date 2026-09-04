@@ -58,15 +58,9 @@ static void key_cb(struct input_event *evt, void *user_data)
 		return;
 	}
 
-	ui_lock();
-	bool demo = !ui_cfg()->demo;
-
-	ui_cfg()->demo = demo;
-	ui_unlock();
-
-	acq_start();                  /* harmless if already running */
-	ui_clear_display();           /* never show the other source's picture */
-	LOG_INF("%s mode", demo ? "DEMO" : "LIVE");
+	/* Spec §1.5: this runs in the input thread. It may not touch LVGL,
+	 * so it only requests the switch; the UI thread applies it. */
+	ui_request_demo_toggle();
 }
 INPUT_CALLBACK_DEFINE(NULL, key_cb, NULL);
 
@@ -106,6 +100,7 @@ int main(void)
 
 		/* ---- fast lane: input and widget animations only ---------- */
 		if ((int32_t)(now_ms - next_frame) < 0) {
+			ui_service();          /* deferred requests, timeouts */
 			lv_timer_handler();
 			next_tick += TICK_MS;
 			int32_t s2 = (int32_t)(next_tick - k_uptime_get_32());

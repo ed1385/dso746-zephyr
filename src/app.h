@@ -203,6 +203,9 @@ void ui_on_frame(struct dso_frame *f, const struct dso_meas *m,
 		 const float *spec_db);
 void ui_sync(const struct dso_meas *m, float sample_rate);
 void ui_clear_display(void);
+void ui_request_demo_toggle(void);   /* safe from any thread            */
+void ui_service(void);               /* UI thread: applies requests,    *
+				      * popup timeout, no-data watchdog */
 struct dso_cfg *ui_cfg(void);            /* the single settings instance    */
 void ui_lock(void);
 void ui_unlock(void);

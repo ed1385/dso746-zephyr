@@ -21,6 +21,8 @@
 #include <lvgl.h>
 #include <string.h>
 #include <stdio.h>
+#include <stddef.h>
+#include <stdlib.h>
 #include <math.h>
 
 #ifndef M_PI
@@ -54,7 +56,9 @@ LOG_MODULE_REGISTER(ui, LOG_LEVEL_INF);
  * Data driven on purpose: one table describes every control, so adding a
  * parameter cannot desynchronise the label, the ladder and the stepper.
  */
-enum ptype { P_LADDER, P_ENUM, P_BOOL, P_FLOAT, P_IDX };
+enum ptype { P_LADDER, P_ENUM, P_BOOL, P_FLOAT, P_IDX, P_ACTION };
+/* how the live-mode popup treats a parameter (spec §1.2) */
+enum ctl { CTL_STEP, CTL_LIST, CTL_TOGGLE, CTL_ACTION };
 
 enum pfmt { F_RAW, F_VOLT, F_SEC, F_HZ, F_PCT, F_DB, F_DIV };
 
@@ -78,7 +82,18 @@ struct param {
 	uint8_t cnt;
 	float min, max, step;
 	bool zoom;                   /* plus steps this parameter downwards  */
+	void (*action)(void);        /* P_ACTION only                        */
 };
+
+static enum ctl param_ctl(const struct param *p)
+{
+	switch (p->type) {
+	case P_ENUM:   return CTL_LIST;
+	case P_BOOL:   return CTL_TOGGLE;
+	case P_ACTION: return CTL_ACTION;
+	default:       return CTL_STEP;      /* ladders and floats: live trace */
+	}
+}
 
 struct group {
 	const char *name;
@@ -130,7 +145,9 @@ static const char *const nm_wave_s[]   = { "SIN", "SQR", "TRI", "RMP+", "RMP-",
 static const struct param p_ch1[] = { CH_PARAMS(0) };
 static const struct param p_ch2[] = { CH_PARAMS(1) };
 
+static void autoset_action(void);
 static const struct param p_time[] = {
+	{ "AUTOSET",   P_ACTION, F_RAW, NULL, NULL, 0, 0, 0, 0, false, autoset_action },
 	{ "TIME/DIV",  P_LADDER, F_SEC, &cfg.tdiv_idx, tdiv_tab, 0, 0, 0, 0, true },
 	{ "H.POSITION", P_FLOAT, F_DIV, &cfg.hpos_div, NULL, 0, -6, 6, 0.2f },
 	{ "ACQUIRE",   P_ENUM,   F_RAW, &cfg.acq_mode, nm_acq, 5, 0, 0, 0 },
@@ -171,7 +188,7 @@ static const struct param p_fwf[] = {
 };
 
 static const struct param p_gwave[] = {
-	{ "WAVEFORM", P_ENUM,  F_RAW, &cfg.gen.wave, nm_wave, 9, 0, 0, 0 },
+	{ "WAVEFORM", P_ENUM,  F_RAW, &cfg.gen.wave, nm_wave, 8, 0, 0, 0 },
 	{ "DUTY",     P_FLOAT, F_PCT, &cfg.gen.duty_pct, NULL, 0, 1, 99, 0.5f },
 };
 static const struct param p_gfreq[] = {
@@ -275,7 +292,7 @@ static lv_obj_t *banner;
 static lv_obj_t *popup, *tile[TILE_N], *tile_lab[TILE_N], *tile_val[TILE_N];
 static bool popup_open;
 static char tile_cache[TILE_N][16];
-static uint8_t tile_sel_cache = 0xFF;
+static uint32_t last_frame_ms;
 static lv_style_t st_key, st_key_on, st_key_pr, st_vb;
 static lv_style_transition_dsc_t tr_ignite, tr_decay;
 
@@ -352,6 +369,9 @@ static void param_text(const struct param *p, char *out, size_t n)
 	case P_BOOL:
 		snprintf(out, n, "%s", *(bool *)p->field ? "ON" : "OFF");
 		break;
+	case P_ACTION:
+		snprintf(out, n, "RUN");
+		break;
 	case P_IDX:
 		if (!p->field) {
 			snprintf(out, n, "-");
@@ -384,6 +404,69 @@ static void param_text(const struct param *p, char *out, size_t n)
 	default:
 		snprintf(out, n, "-");
 	}
+}
+
+/*
+ * Every change goes through here afterwards. Nothing else clamps; if a rule
+ * is missing it is added here, not in a handler.
+ */
+static void validate_cfg(const struct param *edited)
+{
+	if (cfg.tdiv_idx >= tdiv_cnt) cfg.tdiv_idx = (uint8_t)(tdiv_cnt - 1);
+	if (cfg.tdiv_idx < TDIV_MIN_DUAL) cfg.tdiv_idx = TDIV_MIN_DUAL;
+	if (cfg.hpos_div < -6.0f) cfg.hpos_div = -6.0f;
+	if (cfg.hpos_div > 6.0f) cfg.hpos_div = 6.0f;
+	for (int i = 0; i < N_CH; i++) {
+		if (cfg.ch[i].vdiv_idx >= vdiv_cnt) cfg.ch[i].vdiv_idx = (uint8_t)(vdiv_cnt - 1);
+		if (cfg.ch[i].offset_div < -4.0f) cfg.ch[i].offset_div = -4.0f;
+		if (cfg.ch[i].offset_div > 4.0f) cfg.ch[i].offset_div = 4.0f;
+		if (cfg.ch[i].coupling > 2) cfg.ch[i].coupling = 2;
+	}
+	if (cfg.trig.level_v < -1.65f) cfg.trig.level_v = -1.65f;
+	if (cfg.trig.level_v > 1.65f) cfg.trig.level_v = 1.65f;
+	if (cfg.trig.hyst_lsb > 200) cfg.trig.hyst_lsb = 200;
+	if (cfg.trig.source > 1) cfg.trig.source = 1;        /* EXT not wired yet */
+	if (cfg.trig.slope > 2) cfg.trig.slope = 2;
+	if (cfg.trig.mode > 2) cfg.trig.mode = 2;
+	if (cfg.fft.size_idx >= fft_size_cnt) cfg.fft.size_idx = (uint8_t)(fft_size_cnt - 1);
+	if (cfg.fft.span_idx >= FFT_SPAN_CNT) cfg.fft.span_idx = FFT_SPAN_CNT - 1;
+	if (cfg.fft.window > 4) cfg.fft.window = 4;
+	if (cfg.fft.db_div_idx > 4) cfg.fft.db_div_idx = 4;
+	if (cfg.fft.ref_db < -80) cfg.fft.ref_db = -80;
+	if (cfg.fft.ref_db > 20) cfg.fft.ref_db = 20;
+	if (cfg.fft.source > 1) cfg.fft.source = 1;
+
+	/* generator: the DAC window is 0..3.3 V and the pair must fit in it;
+	 * the value being edited is the one that yields */
+	if (cfg.gen.ampl_vpp < 0.05f) cfg.gen.ampl_vpp = 0.05f;
+	if (cfg.gen.ampl_vpp > ADC_VREF) cfg.gen.ampl_vpp = ADC_VREF;
+	if (cfg.gen.offset_v < 0.0f) cfg.gen.offset_v = 0.0f;
+	if (cfg.gen.offset_v > ADC_VREF) cfg.gen.offset_v = ADC_VREF;
+	bool editing_offset = edited && edited->field == &cfg.gen.offset_v;
+
+	if (cfg.gen.offset_v + cfg.gen.ampl_vpp / 2.0f > ADC_VREF) {
+		if (editing_offset) cfg.gen.offset_v = ADC_VREF - cfg.gen.ampl_vpp / 2.0f;
+		else cfg.gen.ampl_vpp = 2.0f * (ADC_VREF - cfg.gen.offset_v);
+	}
+	if (cfg.gen.offset_v - cfg.gen.ampl_vpp / 2.0f < 0.0f) {
+		if (editing_offset) cfg.gen.offset_v = cfg.gen.ampl_vpp / 2.0f;
+		else cfg.gen.ampl_vpp = 2.0f * cfg.gen.offset_v;
+	}
+	if (cfg.gen.ampl_vpp < 0.05f) cfg.gen.ampl_vpp = 0.05f;
+
+	/* synthesised shapes need 10 DAC updates per period: 42 kHz ceiling;
+	 * square and pulse are plain PWM and may go to 1 MHz */
+	float fmax = (cfg.gen.wave == 1 || cfg.gen.wave == 5) ? 1.0e6f : 42000.0f;
+
+	if (cfg.gen.freq_hz > fmax) cfg.gen.freq_hz = fmax;
+	if (cfg.gen.freq_hz < 1.0f) cfg.gen.freq_hz = 1.0f;
+	if (cfg.gen.duty_pct < 1.0f) cfg.gen.duty_pct = 1.0f;
+	if (cfg.gen.duty_pct > 99.0f) cfg.gen.duty_pct = 99.0f;
+	if (cfg.gen.pwm_freq_hz < 2.0f) cfg.gen.pwm_freq_hz = 2.0f;
+	if (cfg.gen.pwm_freq_hz > 2.0e6f) cfg.gen.pwm_freq_hz = 2.0e6f;
+	if (cfg.gen.pwm_duty_pct < 0.0f) cfg.gen.pwm_duty_pct = 0.0f;
+	if (cfg.gen.pwm_duty_pct > 100.0f) cfg.gen.pwm_duty_pct = 100.0f;
+	if (cfg.gen.wave > 7) cfg.gen.wave = 7;               /* ARB not implemented */
 }
 
 static void param_step(const struct param *p, int d)
@@ -452,9 +535,24 @@ static void param_step(const struct param *p, int d)
 		*f = nv < p->min ? p->min : (nv > p->max ? p->max : nv);
 		break;
 	}
+	case P_ACTION:
+		if (p->action) {
+			p->action();
+		}
+		break;
 	default:
 		break;
 	}
+	validate_cfg(p);
+}
+
+/* set an enum directly from a list tile */
+static void param_set_enum(const struct param *p, uint8_t v)
+{
+	if (p->type == P_ENUM && p->field && v < p->cnt) {
+		*(uint8_t *)p->field = v;
+	}
+	validate_cfg(p);
 }
 
 /* ---- canvas rendering -------------------------------------------------- */
@@ -782,8 +880,14 @@ static void update_status(const struct dso_meas *m, float sr)
 		snprintf(t, sizeof(t), "%u pts", fft_size_tab[cfg.fft.size_idx]);
 		set_text(lbl_b, uc.sf[2], 20, t);
 	} else {
+		uint32_t age = k_uptime_get_32() - last_frame_ms;
+
 		if (cfg.demo) {
 			snprintf(t, sizeof(t), "SIM SIGNAL 1kHz");   /* 15 chars, field limit */
+		} else if (cfg.running && age > 500U) {
+			snprintf(t, sizeof(t), cfg.trig.mode ? "WAIT TRIG %s"
+							     : "NO DATA %s",
+				 nm_tsrc[cfg.trig.source]);
 		} else {
 			snprintf(t, sizeof(t), "%s %s %s",
 				 cfg.running ? "TRIG" : "STOP",
@@ -811,7 +915,7 @@ static void refresh_keys(void)
 	char t[24];
 	uint8_t n = group_cnt[cfg.mode];
 	bool mode_changed = (uc.mode != cfg.mode);
-	bool sel_changed = (uc.group != sel_group) || mode_changed;
+	bool sel_changed = (uc.group != sel_group) || mode_changed || (uc.demo != cfg.demo);
 
 	/* key 0 = RUN / OUTPUT, key 1 = MODE, keys 2..7 = groups */
 	bool hot = (cfg.mode == MODE_GEN) ? cfg.gen.out_on : cfg.running;
@@ -883,6 +987,7 @@ static void refresh_keys(void)
 	}
 	uc.mode = cfg.mode;
 	uc.group = sel_group;
+	uc.demo = cfg.demo;
 }
 
 static void refresh_bar(void)
@@ -926,53 +1031,80 @@ static void refresh_bar(void)
 static void apply_now(void);
 static void scope_defaults(void);
 
-/* ---- settings popup ---------------------------------------------------- */
+/* ---- settings popup (spec §4.2) ----------------------------------------- */
+enum popup_page { PG_NONE, PG_PARAMS, PG_LIST, PG_ADJUST };
+static enum popup_page page = PG_NONE;
+static uint32_t last_touch_ms;
+static bool demo_toggle_req;
+static bool frozen_valid;
+static struct dso_frame frozen SDRAM_SECTION;   /* last frame, re-rendered on STOP */
+static struct dso_meas last_meas;
+
+static void tile_style(int i, bool on, uint32_t color)
+{
+	lv_obj_set_style_shadow_width(tile[i], on ? 8 : 4, 0);
+	lv_obj_set_style_shadow_ofs_y(tile[i], on ? 0 : 2, 0);
+	lv_obj_set_style_shadow_color(tile[i], on ? lv_color_hex(color) : lv_color_black(), 0);
+	lv_obj_set_style_shadow_opa(tile[i], on ? LV_OPA_60 : LV_OPA_50, 0);
+	lv_obj_set_style_outline_color(tile[i], lv_color_hex(color), 0);
+	lv_obj_set_style_outline_opa(tile[i], on ? LV_OPA_80 : LV_OPA_TRANSP, 0);
+	if (on) {
+		lv_obj_add_state(tile[i], LV_STATE_CHECKED);
+	} else {
+		lv_obj_remove_state(tile[i], LV_STATE_CHECKED);
+	}
+}
+
+static void tile_set(int i, const char *lab, const char *val)
+{
+	lv_obj_remove_flag(tile[i], LV_OBJ_FLAG_HIDDEN);
+	lv_label_set_text_static(tile_lab[i], lab);
+	if (strncmp(tile_cache[i], val, 15) != 0) {
+		strncpy(tile_cache[i], val, 15);
+		tile_cache[i][15] = '\0';
+		lv_label_set_text(tile_val[i], val);
+	}
+}
+
+/* page of parameters: one tile each, BACK last */
 static void popup_refresh(void)
 {
 	const struct group *g = &groups[cfg.mode][sel_group];
 	char t[24];
 
-	for (int i = 0; i < TILE_DONE; i++) {
-		if (i >= g->np) {
-			lv_obj_add_flag(tile[i], LV_OBJ_FLAG_HIDDEN);
-			continue;
-		}
-		lv_obj_remove_flag(tile[i], LV_OBJ_FLAG_HIDDEN);
-		lv_label_set_text_static(tile_lab[i], g->p[i].label);
-		param_text(&g->p[i], t, sizeof(t));
-		if (strncmp(tile_cache[i], t, 15) != 0) {
-			strncpy(tile_cache[i], t, 15);
-			tile_cache[i][15] = '\0';
-			lv_label_set_text(tile_val[i], t);
-		}
-		if (i == sel_param) {
-			lv_obj_add_state(tile[i], LV_STATE_CHECKED);
-		} else {
-			lv_obj_remove_state(tile[i], LV_STATE_CHECKED);
-		}
-	}
-	if (tile_sel_cache != sel_param) {
-		tile_sel_cache = sel_param;
+	if (page == PG_PARAMS) {
 		for (int i = 0; i < TILE_DONE; i++) {
-			bool on = (i == sel_param);
-
-			lv_obj_set_style_shadow_width(tile[i], on ? 8 : 4, 0);
-			lv_obj_set_style_shadow_ofs_y(tile[i], on ? 0 : 2, 0);
-			lv_obj_set_style_shadow_color(tile[i],
-				on ? lv_color_hex(g->color) : lv_color_black(), 0);
-			lv_obj_set_style_shadow_opa(tile[i], on ? LV_OPA_60 : LV_OPA_50, 0);
-			lv_obj_set_style_outline_color(tile[i], lv_color_hex(g->color), 0);
-			lv_obj_set_style_outline_opa(tile[i], on ? LV_OPA_80 : LV_OPA_TRANSP, 0);
+			if (i >= g->np) {
+				lv_obj_add_flag(tile[i], LV_OBJ_FLAG_HIDDEN);
+				continue;
+			}
+			param_text(&g->p[i], t, sizeof(t));
+			tile_set(i, g->p[i].label, t);
+			tile_style(i, i == sel_param, g->color);
 		}
+		lv_label_set_text_static(tile_val[TILE_DONE], "BACK");
+	} else if (page == PG_LIST) {
+		const struct param *p = &g->p[sel_param];
+		uint8_t cur = p->field ? *(uint8_t *)p->field : 0;
+
+		for (int i = 0; i < TILE_DONE; i++) {
+			if (i >= p->cnt) {
+				lv_obj_add_flag(tile[i], LV_OBJ_FLAG_HIDDEN);
+				continue;
+			}
+			tile_set(i, p->label, ((const char *const *)p->tab)[i]);
+			tile_style(i, i == cur, g->color);
+		}
+		lv_label_set_text_static(tile_val[TILE_DONE], "BACK");
 	}
 }
 
-static void popup_show(bool show)
+static void popup_set_page(enum popup_page pg)
 {
-	popup_open = show;
-	if (show) {
-		tile_sel_cache = 0xFF;
-		memset(tile_cache, 0, sizeof(tile_cache));
+	page = pg;
+	popup_open = (pg == PG_PARAMS || pg == PG_LIST);
+	memset(tile_cache, 0, sizeof(tile_cache));
+	if (popup_open) {
 		lv_obj_remove_flag(popup, LV_OBJ_FLAG_HIDDEN);
 		popup_refresh();
 	} else {
@@ -984,29 +1116,198 @@ static void popup_show(bool show)
 static void tile_cb(lv_event_t *e)
 {
 	int i = (int)(intptr_t)lv_event_get_user_data(e);
+	const struct group *g = &groups[cfg.mode][sel_group];
+
+	last_touch_ms = k_uptime_get_32();
 
 	if (i == TILE_DONE) {
-		popup_show(false);
+		/* BACK: list -> parameters, parameters -> trace */
+		popup_set_page(page == PG_LIST ? PG_PARAMS : PG_NONE);
 		return;
 	}
-	const struct group *g = &groups[cfg.mode][sel_group];
+
+	if (page == PG_LIST) {
+		const struct param *p = &g->p[sel_param];
+
+		if (i < p->cnt) {
+			ui_lock();
+			param_set_enum(p, (uint8_t)i);
+			ui_unlock();
+			apply_now();
+		}
+		popup_set_page(PG_PARAMS);      /* applied on tap, back to the page */
+		refresh_keys();
+		refresh_bar();
+		return;
+	}
 
 	if (i >= g->np) {
 		return;
 	}
+	const struct param *p = &g->p[i];
+
 	ui_lock();
 	sel_param = (uint8_t)i;
-	if (g->p[i].type == P_BOOL) {
-		param_step(&g->p[i], 1);      /* an ON/OFF tile toggles on tap */
-	}
 	ui_unlock();
-	apply_now();
-	popup_refresh();
+
+	switch (param_ctl(p)) {
+	case CTL_LIST:
+		popup_set_page(PG_LIST);
+		break;
+	case CTL_TOGGLE:
+		ui_lock();
+		param_step(p, 1);
+		ui_unlock();
+		apply_now();
+		popup_refresh();
+		break;
+	case CTL_ACTION:
+		ui_lock();
+		param_step(p, 1);
+		ui_unlock();
+		apply_now();
+		popup_set_page(PG_NONE);        /* result must be visible */
+		break;
+	default:
+		/* STEP: collapse so the trace is visible while - / + and drag
+		 * change the value (spec §1.1); the group key reopens the page */
+		popup_set_page(PG_ADJUST);
+		break;
+	}
 	refresh_keys();
 	refresh_bar();
 }
 
-/* ---- events ------------------------------------------------------------ */
+/* ---- drag on the trace (spec §4.2.3) ----------------------------------- */
+static lv_point_t drag_last;
+static bool dragging;
+
+static void canvas_cb(lv_event_t *e)
+{
+	lv_event_code_t code = lv_event_get_code(e);
+	lv_indev_t *indev = lv_indev_active();
+
+	if (!indev || cfg.demo || popup_open) {
+		return;
+	}
+	lv_point_t pt;
+
+	lv_indev_get_point(indev, &pt);
+	last_touch_ms = k_uptime_get_32();
+
+	if (code == LV_EVENT_PRESSED) {
+		drag_last = pt;
+		dragging = true;
+		return;
+	}
+	if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+		dragging = false;
+		return;
+	}
+	if (code != LV_EVENT_PRESSING || !dragging) {
+		return;
+	}
+	int dx = pt.x - drag_last.x, dy = pt.y - drag_last.y;
+
+	if (abs(dx) < 3 && abs(dy) < 3) {
+		return;
+	}
+	drag_last = pt;
+
+	ui_lock();
+	if (cfg.mode == MODE_FFT) {
+		if (abs(dy) >= abs(dx)) {
+			static const float dbdiv_tab[5] = { 1, 2, 5, 10, 20 };
+
+			cfg.fft.ref_db = (int8_t)(cfg.fft.ref_db +
+				(int)(dy * dbdiv_tab[cfg.fft.db_div_idx] / DIV_Y));
+		}
+	} else if (abs(dy) >= abs(dx)) {
+		const struct group *g = &groups[cfg.mode][sel_group];
+
+		if (strcmp(g->name, "TRIG") == 0) {
+			cfg.trig.level_v -= (float)dy / DIV_Y *
+					    vdiv_tab[cfg.ch[cfg.trig.source].vdiv_idx];
+		} else {
+			uint8_t ch = (strcmp(g->name, "CH2") == 0) ? 1 : 0;
+
+			cfg.ch[ch].offset_div -= (float)dy / DIV_Y;
+		}
+	} else {
+		cfg.hpos_div += (float)dx / DIV_X;
+	}
+	validate_cfg(NULL);
+	ui_unlock();
+	apply_now();
+	refresh_keys();
+	refresh_bar();
+}
+
+/* ---- AUTOSET (spec §3) -------------------------------------------------- */
+static void autoset_action(void)
+{
+	/* uses the last measurement of CH1: 1 Vpp -> ~2 divisions, ~4 periods */
+	if (!last_meas.valid) {
+		return;
+	}
+	for (int i = 0; i < N_CH; i++) {
+		uint8_t v = 0;
+
+		while (v + 1 < vdiv_cnt && last_meas.vpp / vdiv_tab[v] > 4.0f) {
+			v++;
+		}
+		cfg.ch[i].vdiv_idx = v;
+	}
+	cfg.ch[0].offset_div = 1.5f;
+	cfg.ch[1].offset_div = -1.5f;
+	if (last_meas.freq_hz > 1.0f) {
+		float want = 4.0f / last_meas.freq_hz / 12.0f;   /* s per div */
+		uint8_t t = 0;
+
+		while (t + 1 < tdiv_cnt && tdiv_tab[t] < want) {
+			t++;
+		}
+		cfg.tdiv_idx = t;
+	}
+	cfg.hpos_div = 0.0f;
+	cfg.trig.level_v = last_meas.vavg;
+	cfg.trig.mode = 0;
+	cfg.running = true;
+}
+
+/* ---- requests from other threads, timeouts, watchdog (spec §1.5, §6) ---- */
+void ui_request_demo_toggle(void)
+{
+	demo_toggle_req = true;              /* consumed by ui_service() */
+}
+
+void ui_service(void)
+{
+	uint32_t now = k_uptime_get_32();
+
+	if (demo_toggle_req) {
+		demo_toggle_req = false;
+		ui_lock();
+		cfg.demo = !cfg.demo;
+		cfg.gen.out_on = false;          /* output never survives a switch */
+		sel_group = 0;
+		sel_param = 0;
+		ui_unlock();
+		popup_set_page(PG_NONE);
+		ui_clear_display();
+		apply_now();
+		refresh_keys();
+		refresh_bar();
+		LOG_INF("%s mode", cfg.demo ? "DEMO" : "LIVE");
+	}
+
+	/* 10 s without a touch: any panel folds back to the trace */
+	if (page != PG_NONE && (now - last_touch_ms) > 10000U) {
+		popup_set_page(PG_NONE);
+		refresh_keys();
+	}
+}
+
 static void apply_now(void)
 {
 	static uint8_t last_tdiv = 0xFF, last_mode = 0xFF, last_span = 0xFF;
@@ -1060,17 +1361,28 @@ static void key_cb(lv_event_t *e)
 			bool same = (g == sel_group);
 
 			sel_group = g;
-			sel_param = 0;
+			if (!same) {
+				sel_param = 0;
+			}
 			if (!cfg.demo) {
-				/* live: the group key is a door - open, or close
-				 * if it is already open for this group */
-				popup_show(!(popup_open && same));
+				/* live: same key while a page is open closes it;
+				 * while adjusting it reopens the page; otherwise
+				 * it opens the page */
+				if (same && popup_open) {
+					popup_set_page(PG_NONE);
+				} else {
+					popup_set_page(PG_PARAMS);
+				}
 			}
 		}
 	}
-	if (id <= 1 && popup_open) {
-		popup_show(false);            /* RUN or MODE always returns to the trace */
+	if (id <= 1 && page != PG_NONE) {
+		popup_set_page(PG_NONE);      /* RUN or MODE always returns to the trace */
 	}
+	if (id == 1) {
+		cfg.gen.out_on = false;       /* output never survives a mode change */
+	}
+	last_touch_ms = k_uptime_get_32();
 	ui_unlock();
 	apply_now();
 	refresh_keys();
@@ -1099,18 +1411,23 @@ static void step_cb(lv_event_t *e)
 	if (popup_open) {
 		popup_refresh();
 	}
+	last_touch_ms = k_uptime_get_32();
 }
 
 static void vb_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
+	if (!cfg.demo) {
+		/* live: the value block reopens the parameter page instead of
+		 * blind cycling - the tiles are the selector (spec §4.2) */
+		popup_set_page(PG_PARAMS);
+		last_touch_ms = k_uptime_get_32();
+		return;
+	}
 	ui_lock();
 	sel_param = (uint8_t)((sel_param + 1) % groups[cfg.mode][sel_group].np);
 	ui_unlock();
 	refresh_bar();
-	if (popup_open) {
-		popup_refresh();
-	}
 }
 
 /* ---- construction ------------------------------------------------------ */
@@ -1295,6 +1612,11 @@ int ui_init(void)
 	canvas = lv_canvas_create(scr);
 	lv_canvas_set_buffer(canvas, cbuf, WAVE_W, WAVE_H, LV_COLOR_FORMAT_RGB565);
 	lv_obj_set_pos(canvas, WAVE_X, WAVE_Y);
+	lv_obj_add_flag(canvas, LV_OBJ_FLAG_CLICKABLE);
+	lv_obj_add_event_cb(canvas, canvas_cb, LV_EVENT_PRESSED, NULL);
+	lv_obj_add_event_cb(canvas, canvas_cb, LV_EVENT_PRESSING, NULL);
+	lv_obj_add_event_cb(canvas, canvas_cb, LV_EVENT_RELEASED, NULL);
+	lv_obj_add_event_cb(canvas, canvas_cb, LV_EVENT_PRESS_LOST, NULL);
 
 	banner = label(scr, 0, WAVE_Y + 84, WAVE_W, &lv_font_montserrat_14,
 		       C_ALARM, LV_TEXT_ALIGN_CENTER);
@@ -1320,7 +1642,7 @@ int ui_init(void)
 				    LV_TEXT_ALIGN_RIGHT);
 	}
 	lv_label_set_text_static(tile_lab[TILE_DONE], "");
-	lv_label_set_text_static(tile_val[TILE_DONE], "DONE");
+	lv_label_set_text_static(tile_val[TILE_DONE], "BACK");
 	lv_obj_set_style_text_color(tile_val[TILE_DONE], lv_color_hex(C_RUN), 0);
 	lv_obj_set_style_text_align(tile_val[TILE_DONE], LV_TEXT_ALIGN_CENTER, 0);
 	lv_obj_set_pos(tile_val[TILE_DONE], 6, 15);
@@ -1433,9 +1755,6 @@ void ui_clear_display(void)
 void ui_sync(const struct dso_meas *m, float sr)
 {
 	ui_lock();
-	if (popup_open && cfg.demo) {
-		popup_show(false);            /* B1 switched to demo under us */
-	}
 	if (sel_group >= group_cnt[cfg.mode]) {
 		sel_group = 0;                /* live-only group, back in demo */
 		sel_param = 0;
@@ -1454,16 +1773,39 @@ void ui_on_frame(struct dso_frame *f, const struct dso_meas *m,
 		memcpy(spec_db, spec, sizeof(spec_db));
 	}
 
+	if (f) {
+		last_frame_ms = k_uptime_get_32();
+		if (m) {
+			last_meas = *m;
+		}
+	}
+
 	switch (cfg.mode) {
-	case MODE_SCOPE:
+	case MODE_SCOPE: {
+		/* RUN: draw the new frame and keep a copy. STOP: keep re-drawing
+		 * the frozen copy, so V/div, offset and persistence changes are
+		 * still visible on the stopped picture (spec §6). */
+		struct dso_frame *src = NULL;
+
 		if (f && cfg.running) {
+			memcpy(&frozen, f, offsetof(struct dso_frame, s));
+			for (uint8_t ch = 0; ch < f->nch && ch < N_CH; ch++) {
+				memcpy(frozen.s[ch], f->s[ch], sizeof(uint16_t) * f->n);
+			}
+			frozen_valid = true;
+			src = f;
+		} else if (!cfg.running && frozen_valid) {
+			src = &frozen;
+		}
+		if (src) {
 			if (cfg.xy_mode) {
-				render_xy(f);
+				render_xy(src);
 			} else {
-				render_scope(f);
+				render_scope(src);
 			}
 		}
 		break;
+	}
 	case MODE_FFT:
 		if (cfg.running) {
 			render_fft();
