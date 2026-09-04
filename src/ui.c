@@ -330,11 +330,10 @@ static lv_obj_t *banner;
 /*
  * LIVE-MODE SETTINGS POPUP
  * ------------------------
- * In demo mode the rail keys select a group and the value block cycles its
- * parameters - that is the showcase face and it stays exactly as it is.
- *
- * A working instrument has too many settings for that. In live mode a group
- * key opens a panel that covers the waveform area: a 3 x 3 grid of tiles,
+ * ONE interface, ONE logic. Demo and live differ in exactly one thing: where
+ * the samples come from (sim.c or the ADC). Every key, page, drag and rule
+ * below behaves identically in both, so nothing can work in one and hang in
+ * the other. A group key opens a panel over the waveform area: a 3 x 3 grid of tiles,
  * 102 x 46 px each with 11 px gaps (both above the touch minimum), one tile
  * per parameter, the last tile is DONE. Tapping a tile selects it - the value
  * block and the -/+ keys then act on it; tapping an ON/OFF tile toggles it
@@ -1369,7 +1368,7 @@ static void canvas_cb(lv_event_t *e)
 	lv_event_code_t code = lv_event_get_code(e);
 	lv_indev_t *indev = lv_indev_active();
 
-	if (!indev || cfg.demo || popup_open) {
+	if (!indev || popup_open) {
 		return;
 	}
 	lv_point_t pt;
@@ -1546,15 +1545,12 @@ static void key_cb(lv_event_t *e)
 			if (!same) {
 				sel_param = 0;
 			}
-			if (!cfg.demo) {
-				/* live: same key while a page is open closes it;
-				 * while adjusting it reopens the page; otherwise
-				 * it opens the page */
-				if (same && popup_open) {
-					popup_set_page(PG_NONE);
-				} else {
-					popup_set_page(PG_PARAMS);
-				}
+			/* same key while a page is open closes it; while adjusting
+			 * it reopens the page; otherwise it opens the page */
+			if (same && popup_open) {
+				popup_set_page(PG_NONE);
+			} else {
+				popup_set_page(PG_PARAMS);
 			}
 		}
 	}
@@ -1599,24 +1595,11 @@ static void step_cb(lv_event_t *e)
 static void vb_cb(lv_event_t *e)
 {
 	ARG_UNUSED(e);
-	if (!cfg.demo) {
-		/* live: the value block reopens the parameter page instead of
-		 * blind cycling - the tiles are the selector (spec §4.2) */
-		popup_set_page(PG_PARAMS);
-		last_touch_ms = k_uptime_get_32();
-		return;
-	}
-	ui_lock();
-	const struct group *g = &groups[cfg.mode][sel_group];
-
-	for (uint8_t k = 0; k < g->np; k++) {
-		sel_param = (uint8_t)((sel_param + 1) % g->np);
-		if (param_visible(&g->p[sel_param])) {
-			break;
-		}
-	}
-	ui_unlock();
-	refresh_bar();
+	/* the value block reopens the parameter page: the tiles are the
+	 * selector, in demo and live alike (spec §4) */
+	popup_set_page(PG_PARAMS);
+	last_touch_ms = k_uptime_get_32();
+	refresh_keys();
 }
 
 /* ---- construction ------------------------------------------------------ */

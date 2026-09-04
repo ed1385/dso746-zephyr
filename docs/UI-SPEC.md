@@ -93,11 +93,13 @@ tap to disable, output is OFF at power-up and after any mode change.
 
 ## 4. Interaction model
 
-### 4.1 Demo mode (showcase)
-Group key selects the group; the value block cycles the group's parameters;
-− / + step. Nothing else. This mode is frozen by decision and is not changed.
+### 4.1 Demo and live are one interface
+Demo and live differ in exactly one thing: the source of samples (the
+simulator or the ADC). Every key, page, list, keypad, drag, timeout and
+validation rule behaves identically in both. The only visible difference is
+the status strip: DEMO with SIM SIGNAL instead of RUN with the trigger line.
 
-### 4.2 Live mode (instrument)
+### 4.2 Interaction
 1. **Group key** opens the group's popup: one tile per parameter with its
    current value, last tile BACK. Tapping the same group key again closes it.
 2. **Tapping a tile**:
