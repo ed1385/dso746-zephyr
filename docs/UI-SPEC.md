@@ -33,6 +33,13 @@ Siglent SSA/SDG and Scopy into rules that fit a 480×272 touch-only panel.
    the ladder downwards.
 8. **Touch targets ≥ 46 px with ≥ 11 px gaps** everywhere, including inside
    popups and lists. Panel density is 5.05 px/mm, so 46 px ≈ 9 mm.
+9. **What is shown is what acts.** A key or tile that would change nothing
+   in the current state is hidden, in both demo and live: TIME and TRIG
+   vanish in XY mode; a switched-off channel shows only its ON/OFF tile;
+   DUTY exists only for square and pulse; PWM FREQ and PWM DUTY only while
+   PWM OUTPUT is on; PALETTE only with the waterfall; − / + hide while a
+   number is being typed. FFT has no channel groups, GEN has no TRIG/TIME.
+   The selection always moves to something visible.
 
 ---
 

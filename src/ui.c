@@ -211,15 +211,73 @@ static const struct group groups[MODE_COUNT][6] = {
 	  G("MEAS", C_LINE, p_meas), G("DISP", C_LINE, p_disp) },
 	{ G("SRC", C_CH2, p_fsrc), G("SCALE", C_LINE, p_fscale),
 	  G("MARK", C_CH1, p_fmark), G("WFALL", C_LINE, p_fwf),
-	  G("CH1", C_CH1, p_ch1), G("CH2", C_CH2, p_ch2) },
+	  G("SRC", C_CH2, p_fsrc), G("SCALE", C_LINE, p_fscale) },
 	{ G("WAVE", C_CH2, p_gwave), G("FREQ", C_CH2, p_gfreq),
 	  G("AMPL", C_CH2, p_gampl), G("PWM", C_CH1, p_gpwm),
-	  G("TRIG", C_CH1, p_trig), G("TIME", C_LINE, p_time) },
+	  G("WAVE", C_CH2, p_gwave), G("FREQ", C_CH2, p_gfreq) },
 };
-/* demo shows the showcase set; live exposes every group of the instrument */
-static const uint8_t group_cnt_demo[MODE_COUNT] = { 6, 4, 4 };
-static const uint8_t group_cnt_live[MODE_COUNT] = { 6, 6, 4 };
-#define group_cnt (cfg.demo ? group_cnt_demo : group_cnt_live)
+static const uint8_t group_cnt[MODE_COUNT] = { 6, 4, 4 };
+
+/*
+ * WHAT IS SHOWN IS WHAT ACTS. A key or a tile that would change nothing in
+ * the current state is hidden, so the user never has to work out whether a
+ * control applies. These two functions are the single place for that logic.
+ */
+static bool group_visible(uint8_t g)
+{
+	if (g >= group_cnt[cfg.mode]) {
+		return false;
+	}
+	if (cfg.mode == MODE_SCOPE && cfg.xy_mode) {
+		/* XY has no time axis and no trigger */
+		const char *n = groups[cfg.mode][g].name;
+
+		if (strcmp(n, "TIME") == 0 || strcmp(n, "TRIG") == 0) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool param_visible(const struct param *p)
+{
+	for (int i = 0; i < N_CH; i++) {
+		/* a switched-off channel shows only its ON/OFF tile */
+		if (!cfg.ch[i].on && p->field != &cfg.ch[i].on &&
+		    (p->field == &cfg.ch[i].vdiv_idx || p->field == &cfg.ch[i].offset_div ||
+		     p->field == &cfg.ch[i].coupling || p->field == &cfg.ch[i].probe_x10 ||
+		     p->field == &cfg.ch[i].bw_limit || p->field == &cfg.ch[i].invert)) {
+			return false;
+		}
+	}
+	/* duty only means something for square and pulse */
+	if (p->field == &cfg.gen.duty_pct && cfg.gen.wave != 1 && cfg.gen.wave != 5) {
+		return false;
+	}
+	/* PWM frequency and duty only when the PWM output is on */
+	if ((p->field == &cfg.gen.pwm_freq_hz || p->field == &cfg.gen.pwm_duty_pct) &&
+	    !cfg.gen.pwm_on) {
+		return false;
+	}
+	/* palette only with the waterfall */
+	if (p->field == &cfg.fft.palette && !cfg.fft.waterfall) {
+		return false;
+	}
+	/* hysteresis is meaningless for AUTO free-run? no - it still gates the
+	 * real trigger; keep it. Averages only when ACQUIRE is AVERAGE. */
+	return true;
+}
+
+/* first visible parameter of a group, or 0 */
+static uint8_t first_visible(const struct group *g)
+{
+	for (uint8_t i = 0; i < g->np; i++) {
+		if (param_visible(&g->p[i])) {
+			return i;
+		}
+	}
+	return 0;
+}
 
 static uint8_t sel_group, sel_param;
 
@@ -247,6 +305,7 @@ struct ui_cache {
 	uint8_t mode, group, param, np;
 	bool hot, demo, meas, banner;
 	uint32_t dot_color;
+	bool restyle;
 };
 static struct ui_cache uc;
 
@@ -265,7 +324,7 @@ static bool set_text(lv_obj_t *o, char *cache, size_t cap, const char *txt)
 /* ---- widgets ----------------------------------------------------------- */
 static lv_obj_t *lbl_state, *lbl_a, *lbl_b, *lbl_c, *lbl_d, *dot;
 static lv_obj_t *canvas, *key[8], *key_name[8], *key_val[8];
-static lv_obj_t *vb, *lbl_par, *lbl_val, *lbl_sub, *dots[8];
+static lv_obj_t *vb, *lbl_par, *lbl_val, *lbl_sub, *dots[8], *key_minus, *key_plus;
 static lv_obj_t *banner;
 
 /*
@@ -292,6 +351,7 @@ static lv_obj_t *banner;
 static lv_obj_t *popup, *tile[TILE_N], *tile_lab[TILE_N], *tile_val[TILE_N];
 static bool popup_open;
 static char tile_cache[TILE_N][16];
+static uint8_t tile_map[TILE_N];      /* tile -> parameter index on PG_PARAMS */
 static uint32_t last_frame_ms;
 static lv_style_t st_key, st_key_on, st_key_pr, st_vb;
 static lv_style_transition_dsc_t tr_ignite, tr_decay;
@@ -938,7 +998,8 @@ static void refresh_keys(void)
 	char t[24];
 	uint8_t n = group_cnt[cfg.mode];
 	bool mode_changed = (uc.mode != cfg.mode);
-	bool sel_changed = (uc.group != sel_group) || mode_changed || (uc.demo != cfg.demo);
+	bool sel_changed = (uc.group != sel_group) || mode_changed || (uc.demo != cfg.demo) || uc.restyle;
+	uc.restyle = false;
 
 	/* key 0 = RUN / OUTPUT, key 1 = MODE, keys 2..7 = groups */
 	bool hot = (cfg.mode == MODE_GEN) ? cfg.gen.out_on : cfg.running;
@@ -970,7 +1031,7 @@ static void refresh_keys(void)
 	for (uint8_t i = 0; i < 6; i++) {
 		lv_obj_t *k = key[i + 2];
 
-		if (i >= n) {
+		if (i >= n || !group_visible(i)) {
 			lv_obj_add_flag(k, LV_OBJ_FLAG_HIDDEN);
 			continue;
 		}
@@ -1043,15 +1104,25 @@ static void refresh_bar(void)
 	}
 	set_text(lbl_sub, uc.sub, sizeof(uc.sub), t);
 
-	/* the dots only move when the selected parameter or the group does */
-	if (uc.param != sel_param || uc.np != g->np) {
-		uc.param = sel_param;
-		uc.np = g->np;
+	/* one dot per VISIBLE parameter; hidden ones do not exist for the user */
+	uint8_t nvis = 0, ivis = 0;
+
+	for (uint8_t i = 0; i < g->np; i++) {
+		if (param_visible(&g->p[i])) {
+			if (i == sel_param) {
+				ivis = nvis;
+			}
+			nvis++;
+		}
+	}
+	if (uc.param != ivis || uc.np != nvis) {
+		uc.param = ivis;
+		uc.np = nvis;
 		for (int i = 0; i < 8; i++) {
-			if (i < g->np) {
+			if (i < nvis) {
 				lv_obj_remove_flag(dots[i], LV_OBJ_FLAG_HIDDEN);
 				lv_obj_set_style_bg_color(dots[i],
-					lv_color_hex(i == sel_param ? C_TXT : C_LINE), 0);
+					lv_color_hex(i == ivis ? C_TXT : C_LINE), 0);
 			} else {
 				lv_obj_add_flag(dots[i], LV_OBJ_FLAG_HIDDEN);
 			}
@@ -1103,14 +1174,21 @@ static void popup_refresh(void)
 	char t[24];
 
 	if (page == PG_PARAMS) {
-		for (int i = 0; i < TILE_DONE; i++) {
-			if (i >= g->np) {
-				lv_obj_add_flag(tile[i], LV_OBJ_FLAG_HIDDEN);
+		int ti = 0;
+
+		for (uint8_t i = 0; i < g->np && ti < TILE_DONE; i++) {
+			if (!param_visible(&g->p[i])) {
 				continue;
 			}
+			tile_map[ti] = i;
 			param_text(&g->p[i], t, sizeof(t));
-			tile_set(i, g->p[i].label, t);
-			tile_style(i, i == sel_param, g->color);
+			tile_set(ti, g->p[i].label, t);
+			tile_style(ti, i == sel_param, g->color);
+			ti++;
+		}
+		for (; ti < TILE_DONE; ti++) {
+			tile_map[ti] = 0xFF;
+			lv_obj_add_flag(tile[ti], LV_OBJ_FLAG_HIDDEN);
 		}
 		lv_label_set_text_static(tile_val[TILE_DONE], "BACK");
 
@@ -1136,6 +1214,14 @@ static void popup_set_page(enum popup_page pg)
 	page = pg;
 	popup_open = (pg == PG_PARAMS || pg == PG_LIST || pg == PG_KEYPAD);
 	memset(tile_cache, 0, sizeof(tile_cache));
+	/* - / + have no meaning while a number is being typed */
+	if (pg == PG_KEYPAD) {
+		lv_obj_add_flag(key_minus, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_add_flag(key_plus, LV_OBJ_FLAG_HIDDEN);
+	} else {
+		lv_obj_remove_flag(key_minus, LV_OBJ_FLAG_HIDDEN);
+		lv_obj_remove_flag(key_plus, LV_OBJ_FLAG_HIDDEN);
+	}
 	if (pg == PG_KEYPAD) {
 		kbuf[0] = '\0';
 		lv_obj_add_flag(popup, LV_OBJ_FLAG_HIDDEN);
@@ -1232,13 +1318,13 @@ static void tile_cb(lv_event_t *e)
 		return;
 	}
 
-	if (i >= g->np) {
+	if (tile_map[i] == 0xFF || tile_map[i] >= g->np) {
 		return;
 	}
-	const struct param *p = &g->p[i];
+	const struct param *p = &g->p[tile_map[i]];
 
 	ui_lock();
-	sel_param = (uint8_t)i;
+	sel_param = tile_map[i];
 	ui_unlock();
 
 	switch (param_ctl(p)) {
@@ -1250,6 +1336,7 @@ static void tile_cb(lv_event_t *e)
 		param_step(p, 1);
 		ui_unlock();
 		apply_now();
+		uc.restyle = true;
 		popup_refresh();
 		break;
 	case CTL_ACTION:
@@ -1520,7 +1607,14 @@ static void vb_cb(lv_event_t *e)
 		return;
 	}
 	ui_lock();
-	sel_param = (uint8_t)((sel_param + 1) % groups[cfg.mode][sel_group].np);
+	const struct group *g = &groups[cfg.mode][sel_group];
+
+	for (uint8_t k = 0; k < g->np; k++) {
+		sel_param = (uint8_t)((sel_param + 1) % g->np);
+		if (param_visible(&g->p[sel_param])) {
+			break;
+		}
+	}
 	ui_unlock();
 	refresh_bar();
 }
@@ -1845,6 +1939,9 @@ int ui_init(void)
 	lv_obj_t *minus = panel(scr, 4, 218, 56, 48, C_BTN);
 	lv_obj_t *plus = panel(scr, 276, 218, 56, 48, C_BTN);
 
+	key_minus = minus;
+	key_plus = plus;
+
 	lv_obj_add_style(minus, &st_key, 0);
 	lv_obj_add_style(minus, &st_key_pr, LV_STATE_PRESSED);
 	lv_obj_add_style(plus, &st_key, 0);
@@ -1919,9 +2016,12 @@ void ui_clear_display(void)
 void ui_sync(const struct dso_meas *m, float sr)
 {
 	ui_lock();
-	if (sel_group >= group_cnt[cfg.mode]) {
-		sel_group = 0;                /* live-only group, back in demo */
-		sel_param = 0;
+	if (!group_visible(sel_group)) {
+		sel_group = 0;                /* the selected group just vanished */
+		sel_param = first_visible(&groups[cfg.mode][0]);
+		uc.restyle = true;
+	} else if (!param_visible(&groups[cfg.mode][sel_group].p[sel_param])) {
+		sel_param = first_visible(&groups[cfg.mode][sel_group]);
 	}
 	update_status(m, sr);
 	refresh_keys();
