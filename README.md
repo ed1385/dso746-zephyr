@@ -1,339 +1,296 @@
-# Цифровой осциллограф, анализатор спектра и генератор сигналов
+# Digital Oscilloscope, FFT Spectrum Analyzer and Signal Generator
 
-Три режима на одном экране одной отладочной платы, управление полностью
-сенсорное.
+Three instruments on a single development board, one 480×272 touchscreen, no
+external hardware required.
 
-**Плата: STM32F746G-DISCO** (STM32F746NG, Cortex-M7 216 МГц, экран 4.3" 480×272,
-ёмкостный тач FT5336, 8 МБ SDRAM). Внешних деталей не требуется.
+*Русская версия: [README.ru.md](README.ru.md).*
 
-> **Проект в разработке.** Демонстрационный режим работает полностью и именно он
-> показан на снимках ниже. Боевой режим — реальный сбор с АЦП — реализован, но
-> обкатан не полностью: часть функций проверена только расчётом и хостовыми
-> тестами. Подробности в разделе [Текущее состояние](#текущее-состояние).
+**Target: STM32F746G-DISCO** (STM32F746NG, Cortex-M7 @ 216 MHz, 4.3" 480×272
+LCD, FT5336 capacitive touch, 8 MB SDRAM). **Firmware: Zephyr RTOS + LVGL 9.**
 
----
-
-> Полная справочная страница с таблицей характеристик и всеми режимами: **[docs/REFERENCE.md](docs/REFERENCE.md)**.
-
-## Интерфейс
-
-### Осциллограф
-
-![Режим осциллографа](docs/images/ui-scope.png)
-
-Два канала, послесвечение с настраиваемым временем затухания, автоматические
-измерения, маркеры уровня запуска и нуля каналов, сетка 12×8 делений.
-
-### Анализатор спектра
-
-![Режим анализатора спектра](docs/images/ui-fft.png)
-
-БПФ до 4096 точек, пять оконных функций, поиск пиков, водопад с тремя палитрами,
-выбор полосы обзора.
-
-### Генератор
-
-![Режим генератора](docs/images/ui-gen.png)
-
-Предпросмотр формы, карточки текущих параметров, включение выхода удержанием
-клавиши 600 мс, индикация ограничения выхода.
-
-### Фосфорная подсветка клавиш
-
-![Нажатая клавиша](docs/images/ui-pressed.png)
-
-Нажатая клавиша разгорается мгновенно и гаснет за 260 мс — это штатный механизм
-переходов стиля LVGL, а не покадровая анимация. Ореол горит только на активной
-клавише и на RUN: тень в LVGL считается программно и не ускоряется DMA2D.
-
-Все снимки сделаны с интерактивного макета интерфейса `docs/ui-mockup.html`,
-который выполнен один в один с прошивкой: та же геометрия в пикселях и та же
-палитра, уже квантованная в RGB565. Макет открывается в любом браузере, кликается
-и служит для проверки вёрстки без платы.
+> **Work in progress.** Demo mode is fully functional and is what the
+> screenshots below show. Live mode — real acquisition from the ADC — is
+> implemented but not fully validated on hardware; some parts are verified by
+> calculation and host tests only. See [Project status](#project-status).
 
 ---
 
-## Технические характеристики
+## User interface
 
-### Осциллограф
-| Параметр | Значение |
-|---|---|
-| Каналов | 2, одновременная выборка (ADC1/PA0, ADC3/PF10, общий запуск TIM2) |
-| Разрядность АЦП | 12 бит |
-| Макс. частота выборки | 1.80 MSa/s на канал (5.40 MSa/s одноканально — задел) |
-| Макс. измеряемая частота | 360 кГц (при правиле выборка ≥ 5× сигнала) |
-| Диапазон входа | 0…3.3 В (±5 В и ±50 В с щупом ×10 — с будущим трактом) |
-| Цена деления | 20 мВ…2 В/дел, ряд 1-2-5 |
-| Разрешение по напряжению | 0.81 мВ/LSB |
-| Развёртка | 20 мкс…100 мс/дел, ряд 1-2-5, 13 ступеней |
-| Длина записи на экран | 336…1344 отсчёта (min/max на столбец) |
-| Предзапуск | 0…100 % записи (H.POSITION ±6 делений) |
-| Отображение | послесвечение 0.1 с…∞, XY, сетка |
+### Oscilloscope
+![Oscilloscope](docs/images/ui-scope.png)
 
-### Запуск
-| Параметр | Значение |
-|---|---|
-| Тип | программный, по фронту, с гистерезисом и перевзводом |
-| Источник | CH1, CH2 (EXT на PG6 — задел) |
-| Фронт / режим | RISE/FALL/BOTH · AUTO/NORMAL/SINGLE |
-| Гистерезис | 0…160 мВ шагами 8 мВ |
-| Джиттер | ±1 отсчёт (0.56 мкс при 1.8 MSa/s) |
+Two channels, simultaneous sampling, persistence, automatic measurements, XY
+mode, cursors, trigger-level and channel-ground markers, 12×8 graticule.
 
-### Измерения
-Vpp, Vmax, Vmin, Vavg, Vrms, частота, скважность.
+### FFT spectrum analyzer
+![Spectrum analyzer](docs/images/ui-fft.png)
 
-### Анализатор спектра
-| Параметр | Значение |
-|---|---|
-| Длина БПФ | 256…4096 точек |
-| Окна | прямоугольное, Hann, Hamming, Blackman-Harris, flat-top |
-| Полоса обзора | 8 / 32 / 128 / 900 кГц (частота выборки 16.4k…1.8M) |
-| Разрешение по частоте | 4 Гц…440 Гц |
-| Время БПФ 2048 | ≈ 0.3 мс (Cortex-M7 216 МГц с FPU) |
-| Динамический диапазон | ≈ 70 дБ |
-| Водопад | 84 строки, три палитры |
+FFT up to 4096 points, five window functions, selectable span, peak search,
+waterfall with three color maps.
 
-### Генератор (ШИМ-ЦАП на PB4)
-| Параметр | Значение |
-|---|---|
-| Формы | синус, меандр, треугольник, пила ↑/↓, импульс, sinc, шум |
-| Синус / треугольник / пила | 1 Гц…42 кГц |
-| Меандр, импульс | до ≈1 МГц |
-| Размах | 0.05…3.3 Vpp, шаг 50 мВ |
-| Смещение | 0…3.3 В (амплитуда и смещение вместе всегда в 0…3.3 В) |
-| Несущая ШИМ | 8 бит → 422 кГц, 10 бит → 105 кГц (выбор автоматический) |
-| Ввод частоты | цифровая клавиатура, множитель Hz/kHz/MHz = применение |
-| Калибратор / меандр | PH6 (D6), 2 Гц…2 МГц, скважность 0…100 % |
+### Signal generator
+![Generator](docs/images/ui-gen.png)
 
-### Интерфейс и платформа
-| Параметр | Значение |
-|---|---|
-| Экран | 4.3", 480×272, RGB565, двойная буферизация LTDC |
-| Отрисовка луча | 20 кадров/с, карта интенсивности 8 бит на канал |
-| Отклик на касание | опрос ввода каждые 10 мс |
-| Ускорение графики | DMA2D (Chrom-ART) |
-| Сенсорные цели | ≥ 46 px (9 мм), зазоры ≥ 11 px |
-| Ресурсы | FLASH 44 % из 1 МБ, SRAM 47 % из 256 КБ, SDRAM 1.2 МБ из 8 |
+Waveform preview, numeric frequency entry, amplitude, offset and duty; output
+armed by a long press; separate calibrator/square output.
+
+### Phosphor key highlight
+![Pressed key](docs/images/ui-pressed.png)
+
+A pressed key ignites instantly and decays over 260 ms — a native LVGL style
+transition, not a per-frame animation. The glow is drawn only on the active
+key and RUN: shadows are computed in software and are not DMA2D-accelerated.
+
+Screenshots are renders of the interactive mockup `docs/ui-mockup.html`, built
+pixel-for-pixel against the firmware: same geometry, same palette already
+quantized to RGB565. Open it in any browser — it is clickable.
 
 ---
 
+## Operating modes
+
+- **Oscilloscope** — two channels, simultaneous sampling, persistence,
+  automatic measurements, XY mode, cursors, level markers.
+- **FFT spectrum analyzer** — up to 4096-point FFT, five windows, selectable
+  span, peak search, waterfall with three palettes.
+- **Signal generator** — eight waveforms, numeric frequency entry, amplitude,
+  offset, duty; output enabled by press-and-hold; separate calibrator/square.
+- **Demo** and **live** — identical logic and interface; the *only* difference
+  is the sample source (the simulator vs the ADC). Toggled by the blue **B1
+  USER** button on the back of the board (pin PI11). The instrument always
+  boots into demo mode.
+
 ---
 
-## Как пользоваться
+## Technical characteristics
 
-### Сборка
-
-```
-west build -b stm32f746g_disco -p always .
-```
-
-Overlay из каталога `boards` подхватывается по имени платы автоматически.
-
-### Загрузка
-
-Плата содержит ST-LINK/V2-1, отдельный программатор не нужен.
-
-1. Подключить кабель к разъёму **CN14 (ST-LINK)**.
-2. В системе появится диск **DIS_F746NG**.
-3. Скопировать на него `build/zephyr/zephyr.bin` — плата прошьётся и
-   перезапустится сама.
-
-Альтернативно `west flash` (нужен STM32CubeProgrammer в PATH) или готовый
-`.hex` из [Releases](../../releases). Консоль Zephyr — на том же кабеле,
-виртуальный COM-порт, 115200 8N1.
-
-Если копирование на диск молча не срабатывает, обновите прошивку самого ST-LINK
-и выберите вариант **Debug + Mass Storage + VCP** — без Mass Storage диск не
-появляется. Внутренняя флэш 1 МБ, образ занимает 44 %.
-
-### Боевой режим (LIVE)
-
-Поведение прибора задано спецификацией **docs/UI-SPEC.md** (на английском);
-код пишется под неё. Кратко:
-
-Клавиша **B1 USER** переключает DEMO ↔ LIVE. Интерфейс и логика в обоих
-режимах **одни и те же** — отличается только источник отсчётов: симулятор
-или АЦП. Клавиша группы открывает
-панель параметров поверх луча — 3×3 плитки, последняя BACK. Касание плитки:
-
-- **список** (связь, щуп, фронт, режим запуска, окно, форма сигнала и т.п.) —
-  панель показывает страницу вариантов, по плитке на вариант; касание варианта
-  применяет его сразу и возвращает на страницу параметров;
-- **шаговое значение** (вольты и время на деление, смещение, уровень запуска,
-  частота, амплитуда) — панель сворачивается, луч виден, клавиши − и + и
-  перетаскивание по экрану меняют значение с живым обновлением луча; клавиша
-  группы возвращает страницу;
-- **частота** (генератор, ШИМ) — цифровая клавиатура: набираете число, оно
-  видно в поле значения, затем жмёте множитель Hz, kHz или MHz — он же
-  применяет значение после проверки допустимости (выход за диапазон
-  обрезается до границы), панель сворачивается, луч виден, клавишами − и +
-  можно подстроить;
-- **ВКЛ/ВЫКЛ** — переключается на месте; **AUTOSET** — выполняется сразу.
-
-Перетаскивание по лучу: по вертикали — смещение выбранного канала или уровень
-запуска при выбранной группе TRIG, по горизонтали — положение развёртки.
-
-Любая панель закрывается клавишей BACK, той же клавишей группы, RUN, MODE,
-переключением демо/боевой и через 10 с без касаний. Все значения проходят
-единую проверку допустимости; недопустимую комбинацию ввести нельзя
-(например амплитуда и смещение генератора вместе всегда умещаются в 0…3.3 В).
-STOP замораживает последний кадр, и органы управления продолжают его
-перерисовывать. Если в боевом режиме нет данных, статус показывает NO DATA
-или WAIT TRIG, интерфейс при этом не останавливается.
-
-Технические характеристики и их расчёт — в **SPECS.md**.
-
-
-### Управление
-
-Прибор **всегда стартует в демонстрационном режиме**: сигналы синтезируются,
-к входам ничего подключать не нужно. В статусной строке горит **DEMO** и надпись
-SIMULATED SIGNAL.
-
-Переключение демонстрационного и боевого режимов — **синяя кнопка B1 USER на
-обратной стороне платы**, со стороны монтажа, рядом с чёрной кнопкой сброса B2
-RESET. В документации ST она обозначена как USER & WAKE-UP Button и заведена на
-вывод PI11. Нажатие переключает режим в обе стороны, экран при этом очищается,
-чтобы картинка из другого источника не осталась на экране.
-
-| Орган | Действие |
+### Oscilloscope
+| Parameter | Value |
 |---|---|
-| **B1 USER** (кнопка на обратной стороне платы) | демонстрационный режим ↔ боевой |
-| **MODE** | циклически SCOPE → FFT → GEN |
-| **RUN / STOP** | пуск и остановка; в режиме генератора — включение выхода удержанием 600 мс |
-| Клавиши групп | выбор группы параметров; в боевом режиме открывают всплывающую панель настроек |
-| Поле значения | перелистывает параметры внутри группы, точки слева показывают позицию |
-| **−** и **+** | изменяют выбранный параметр, удержание даёт автоповтор |
+| Channels | 2, simultaneous sampling (ADC1/PA0, ADC3/PF10, common TIM2 trigger) |
+| ADC resolution | 12-bit |
+| Max sample rate | 1.80 MSa/s per channel (5.40 MSa/s single-channel — planned) |
+| Max measurable frequency | 360 kHz (at the ≥ 5× oversampling rule) |
+| Input range | 0…3.3 V (±5 V, and ±50 V with a ×10 probe — with the future front end) |
+| Vertical scale | 20 mV…2 V/div, 1-2-5 sequence |
+| Voltage resolution | 0.81 mV/LSB |
+| Timebase | 20 µs…100 ms/div, 1-2-5 sequence, 13 steps |
+| Record length per screen | 336…1344 samples (min/max per column) |
+| Pre-trigger | 0…100 % of the record (H-position ±6 div) |
+| Display | persistence 0.1 s…∞, XY, graticule |
 
-Правило клавиш **−** и **+** одно и без исключений: **плюс всегда увеличивает
-то, что видно на экране**. Для смещения, уровня запуска и амплитуды это совпадает
-с ростом числа; для вольт на деление и времени на деление плюс шагает лестницу
-вниз, потому что именно так луч становится крупнее.
+### Trigger
+| Parameter | Value |
+|---|---|
+| Type | software, edge, with hysteresis and re-arm |
+| Source | CH1, CH2 (EXT on PG6 — planned) |
+| Slope / mode | Rising/Falling/Either · Auto/Normal/Single |
+| Hysteresis | 0…160 mV in 8 mV steps |
+| Jitter | ±1 sample (0.56 µs at 1.8 MSa/s) |
 
-### Входы и выходы
+### Measurements
+Vpp, Vmax, Vmin, Vavg, Vrms, frequency, duty cycle.
 
-| Сигнал | Вывод | Разъём |
+### FFT spectrum analyzer
+| Parameter | Value |
+|---|---|
+| FFT length | 256…4096 points |
+| Windows | Rectangular, Hann, Hamming, Blackman-Harris, Flat-Top |
+| Span | 8 / 32 / 128 / 900 kHz (sample rate 16.4k…1.8M) |
+| Frequency resolution | 4 Hz…440 Hz |
+| FFT time, 2048 pts | ≈ 0.3 ms (Cortex-M7 @ 216 MHz with FPU) |
+| Dynamic range | ≈ 70 dB |
+| Waterfall | 84 lines, three palettes |
+
+### Signal generator (PWM-DAC on PB4)
+| Parameter | Value |
+|---|---|
+| Waveforms | sine, square, triangle, ramp up/down, pulse, sinc, noise |
+| Sine / triangle / ramp | 1 Hz…42 kHz |
+| Square, pulse | up to ≈ 1 MHz |
+| Amplitude | 0.05…3.3 Vpp, 50 mV steps |
+| Offset | 0…3.3 V (offset ± amplitude/2 always kept within 0…3.3 V) |
+| PWM carrier | 8-bit → 422 kHz, 10-bit → 105 kHz (selected automatically) |
+| Frequency entry | numeric keypad; the unit key (Hz/kHz/MHz) multiplies and applies |
+| Calibrator / square | PH6 (D6), 2 Hz…2 MHz, duty 0…100 % |
+
+### Interface and platform
+| Parameter | Value |
+|---|---|
+| Display | 4.3", 480×272, RGB565, double-buffered LTDC |
+| Trace rendering | 20 fps, 8-bit intensity map per channel |
+| Touch latency | input polled every 10 ms |
+| Graphics acceleration | DMA2D (Chrom-ART) |
+| Touch targets | ≥ 46 px (9 mm), gaps ≥ 11 px |
+| Resource use | FLASH 44 % of 1 MB, SRAM 47 % of 256 KB, SDRAM 1.2 MB of 8 |
+
+---
+
+## Building
+
+    west build -b stm32f746g_disco -p always .
+
+The board overlay in `boards/` is picked up automatically by board name.
+
+## Flashing
+
+The board carries an on-board ST-LINK/V2-1; no separate programmer is needed.
+
+1. Connect a cable to **CN14 (ST-LINK)**.
+2. A **DIS_F746NG** mass-storage drive appears.
+3. Copy `build/zephyr/zephyr.bin` onto it — the board flashes and restarts.
+
+Alternatively `west flash` (STM32CubeProgrammer in PATH) or the prebuilt
+`.hex` from [Releases](../../releases). The Zephyr console is on the same
+cable: virtual COM port, 115200 8N1.
+
+If the drag-and-drop copy silently fails, update the ST-LINK firmware itself
+and pick the **Debug + Mass Storage + VCP** variant — without Mass Storage the
+drive does not appear. Internal flash is 1 MB; the image uses 44 %.
+
+## Controls
+
+The instrument **always boots into demo mode**: signals are synthesized,
+nothing needs to be connected. The status line shows **DEMO** and SIM SIGNAL.
+The blue **B1 USER** button on the back of the board (pin PI11, next to the
+black B2 RESET) toggles demo and live in both directions.
+
+| Control | Action |
+|---|---|
+| **B1 USER** (button on the back) | demo ↔ live |
+| **MODE** | cycle SCOPE → FFT → GEN |
+| **RUN / STOP** | run and stop; in generator mode, enable the output by press-and-hold |
+| Group keys | open the parameter panel over the trace |
+| Parameter tile | a list opens an options page (applied on tap); a stepped value collapses the panel so − / + and drag on the trace adjust it live; a frequency opens the keypad |
+| **−** / **+** | change the selected parameter; auto-repeat on hold |
+| Drag on the trace | channel offset, trigger level, horizontal position |
+
+The stepper rule is single and absolute: **plus always makes what you see on
+screen larger** — for scale parameters that steps the ladder down. Keys and
+tiles that would do nothing in the current state are hidden.
+
+## Inputs and outputs
+
+| Signal | Pin | Connector |
 |---|---|---|
-| Канал 1 | PA0 | Arduino A0 |
-| Канал 2 | PF10 | Arduino A1 |
-| Выход генератора (ШИМ-ЦАП) | PB4 | Arduino D3 |
-| Калибратор / жёсткий меандр | PH6 | Arduino D6 |
-| Внешний запуск (задел) | PG6 | Arduino D2 |
+| Channel 1 | PA0 | Arduino A0 |
+| Channel 2 | PF10 | Arduino A1 |
+| Generator output (PWM-DAC) | PB4 | Arduino D3 |
+| Calibrator / square | PH6 | Arduino D6 |
+| External trigger (planned) | PG6 | Arduino D2 |
 
-Вход принимает **0…3.3 В** — аналогового тракта на плате нет. Прошивка написана
-так, что подключение внешнего делителя со смещением меняет только константы
-калибровки.
-
----
-
-## Как это работает
-
-Полное описание архитектуры от вывода до пикселя — в
-[docs/architecture.md](docs/architecture.md), расчётные характеристики — в
-[SPECS.md](SPECS.md).
-
-**Сбор.** TIM2 своим событием TRGO запускает ADC1 (канал 1) и ADC3 (канал 2)
-одновременно, поэтому каналы синхронны с точностью до такта ADCCLK. Данные идут
-кольцевым DMA с прерываниями по половине и по концу буфера. Кольцо живёт во
-внутренней SRAM и вне кэша: LTDC непрерывно читает кадр из SDRAM, и второй поток
-туда же отнял бы у него полосу FMC, а D-cache процессора DMA не видит.
-
-**Запуск** программный, по фронту, с гистерезисом и перевзводом: взводимся только
-после ухода сигнала за пределы зоны гистерезиса, поэтому один шумный переход не
-даёт серию ложных срабатываний. Гистерезис, удержание и частота дискретизации
-вынесены в меню.
-
-**Отрисовка луча** идёт мимо виджетов. Отсчёты сводятся к 336 парам min/max — по
-одной на пиксельный столбец, так одиночный выброс не теряется при прореживании.
-Пары пишутся в карту интенсивности 8 бит на канал; послесвечение — это вычитание
-константы из всей карты раз в кадр, после чего карты сводятся в холст RGB565
-через цветовую рампу канала.
-
-**Разделение нагрузки.** LVGL опрашивается каждые 10 мс — это даёт отклик на
-касание около 40 мс, — а осциллограмма пересчитывается раз в 50 мс. Ни один
-виджет не переписывается, если его значение не изменилось, поэтому на спокойной
-панели перерисовывается только прямоугольник луча. Заливки и переносы выполняет
-аппаратный ускоритель Chrom-ART (DMA2D) по прерыванию завершения.
+The input accepts **0…3.3 V** — there is no analog front end on the board. The
+firmware is written so that adding an external divider with offset changes only
+the calibration constants.
 
 ---
 
-## Программный стек
+## How it works
 
-| Слой | Что использовано |
+Full hardware-to-GUI architecture is in [docs/architecture.md](docs/architecture.md);
+the UI logic specification is in [docs/UI-SPEC.md](docs/UI-SPEC.md).
+
+**Acquisition.** TIM2 TRGO triggers ADC1 (CH1) and ADC3 (CH2) at the same
+event, so the channels are synchronous to within one ADCCLK cycle. Samples are
+streamed by circular DMA with half- and full-transfer interrupts. The ring
+lives in internal SRAM and outside the D-cache: LTDC reads the framebuffer from
+SDRAM continuously, a second stream into SDRAM would starve it of FMC
+bandwidth, and the Cortex-M7 data cache is invisible to DMA.
+
+**Trigger** is software, edge, with hysteresis and re-arm: it re-arms only
+after the signal has left the hysteresis band, so a single noisy edge cannot
+produce a burst of triggers. Hysteresis, hold-off and sample rate are exposed
+in the menu.
+
+**Trace rendering** bypasses widgets. Samples are reduced to 336 min/max pairs,
+one per pixel column, so a single spike survives decimation. The pairs are
+written into an 8-bit-per-channel intensity map; persistence is a constant
+subtracted from the whole map once per frame, then the maps are composed into
+an RGB565 canvas through a per-channel color ramp.
+
+**Load split.** LVGL is serviced every 10 ms — about 40 ms touch latency — and
+the waveform is recomputed every 50 ms. No widget is rewritten unless its value
+actually changed, so a quiet panel only redraws the trace rectangle. Fills and
+blits go to the Chrom-ART (DMA2D) accelerator.
+
+---
+
+## Software stack
+
+| Layer | Used |
 |---|---|
-| ОС | **Zephyr RTOS** (main, 4.4.99): потоки, слэб памяти, очереди, семафоры, мьютексы, разметка некэшируемой области через MPU |
-| Сборка | west, CMake, Kconfig, devicetree; **Zephyr SDK 1.0.1**, arm-zephyr-eabi GCC 14.3.0, picolibc |
-| Графика | **LVGL 9** через штатный модуль Zephyr; блок отрисовки на **DMA2D (Chrom-ART)** по прерыванию |
-| ЦОС | **CMSIS-DSP**: `arm_rfft_fast_f32`, вычисление модуля спектра на аппаратном FPU |
-| Драйверы | LTDC (экран), FT5336 через подсистему input (тач), I2C, gpio-keys (клавиша B1), подсистема логирования |
-| Периферия | **STM32Cube LL** напрямую для АЦП, таймеров, DMA и выводов |
+| OS | **Zephyr RTOS** (main, 4.4.99): threads, memory slab, queues, semaphores, mutexes, MPU-tagged non-cacheable region |
+| Build | west, CMake, Kconfig, devicetree; **Zephyr SDK 1.0.1**, arm-zephyr-eabi GCC 14.3.0, picolibc |
+| Graphics | **LVGL 9** via the Zephyr module; **DMA2D (Chrom-ART)** draw unit |
+| DSP | **CMSIS-DSP**: `arm_rfft_fast_f32`, magnitude on the hardware FPU |
+| Drivers | LTDC (display), FT5336 via the input subsystem (touch), I2C, gpio-keys (B1), logging |
+| Peripherals | **STM32Cube LL** directly for the ADC, timers, DMA and pins |
 
-Обращение к LL — сознательное исключение: штатный драйвер АЦП в Zephyr умеет
-только одиночное чтение и не даёт непрерывного кольцевого DMA, без которого
-осциллографа не бывает. Соответствующие узлы отключены в devicetree, чтобы
-драйверы не конфликтовали за потоки DMA и прерывания.
+Using LL is a deliberate exception: the Zephyr ADC driver offers only one-shot
+reads and cannot do continuous circular DMA, which an oscilloscope needs. The
+matching devicetree nodes are disabled so the drivers do not fight over the DMA
+streams and interrupts.
 
-### Проверка без платы
+### Host tests
 
-Алгоритмическое ядро — поиск запуска, предзапуск с заворотом кольца, сведение
-min/max, измерения, планировщик развёртки — вынесено в файлы без единого
-обращения к железу и собирается обычным компилятором на хосте:
+The algorithm core — trigger search, pre-trigger extraction, min/max
+reduction, measurements, the sweep planner — is in files with no hardware
+access and builds with a normal compiler on the host:
 
-```
-cd tests/host
-cc -I../../src -O2 -Wall -Wextra test_algo.c ../../src/acq_algo.c \
-   ../../src/dsp_math.c -lm -o test_algo && ./test_algo
-```
+    cd tests/host
+    cc -I../../src -O2 -Wall -Wextra test_algo.c ../../src/acq_algo.c \
+       ../../src/dsp_math.c -lm -o test_algo && ./test_algo
 
-Тест проверяет, что при 500 мкс/дел на экран укладывается ровно 6 периодов
-сигнала 1 кГц, что одиночный выброс переживает прореживание, что самая быстрая
-развёртка физически достижима, и что гистерезис действительно лечит ложные
-запуски: на медленной зашумлённой синусоиде без него получается 33 срабатывания
-там, где должно быть 4.
+The tests check that 500 µs/div shows exactly 6 periods of a 1 kHz signal, that
+a single spike survives decimation, that the fastest sweep is physically
+reachable, and that hysteresis actually cures false triggers: without it a slow
+noisy sine yields 33 triggers where there should be 4.
 
 ---
 
-## Структура
+## Repository layout
 
 ```
-src/acq.c        TIM2 + ADC1/ADC3 + кольцевой DMA2, поток поиска запуска
-src/acq_algo.c   триггер, предзапуск, min/max, планировщик развёртки, лестницы
-src/dsp.c        окна и БПФ через CMSIS-DSP
-src/dsp_math.c   автоизмерения Vpp, Vrms, частота, скважность
-src/gen.c        ШИМ-ЦАП на PB4 и калибратор на PH6
-src/sim.c        генератор сигналов демонстрационного режима
-src/ui.c         LVGL: панель клавиш, всплывающие настройки, отрисовка трёх режимов
-src/main.c       инициализация, две дорожки обновления интерфейса
-boards/          overlay платы
-docs/            архитектура и интерактивный макет интерфейса
-tests/host/      тесты алгоритмов, собираются на хосте
+src/acq.c        TIM2 + ADC1/ADC3 + circular DMA2, trigger-search thread
+src/acq_algo.c   trigger, pre-trigger, min/max, sweep planner, ladders
+src/dsp.c        windows and FFT via CMSIS-DSP
+src/dsp_math.c   automatic measurements (Vpp, Vrms, frequency, duty)
+src/gen.c        PWM-DAC on PB4 and the calibrator on PH6
+src/sim.c        demo-mode signal simulator
+src/ui.c         LVGL: key panel, settings popups, three render modes
+src/main.c       init, two-rate UI loop
+boards/          board overlay
+docs/            architecture, UI spec, interactive mockup
+tests/host/      algorithm tests, built on the host
 ```
 
 ---
 
-## Текущее состояние
+## Project status
 
-**Работает и проверено на плате:** демонстрационный режим во всех трёх экранах,
-сенсорное управление, фосфорная подсветка, всплывающие панели настроек,
-переключение демо/боевой клавишей B1, загрузка через диск ST-LINK.
+**Working and verified on hardware:** demo mode in all three screens, touch
+control, phosphor highlight, settings popups, demo/live switching via B1,
+flashing over the ST-LINK drive.
 
-**Проверено расчётом и хостовыми тестами:** алгоритмы сбора и измерений,
-планировщик развёртки, карта выводов по UM1907, номера потоков DMA по RM0385.
+**Verified by calculation and host tests:** the acquisition and measurement
+algorithms, the sweep planner, the pin map (UM1907), the DMA stream numbers
+(RM0385).
 
-**Не доведено:**
+**Not finished:**
 
-- Боевой режим на реальных сигналах обкатан не полностью.
-- Чередование АЦП не реализовано, поэтому развёртка ограничена 20 мкс/дел;
-  одноканальный режим на 5.4 MSa/s остаётся заделом.
-- Спектр ШИМ-ЦАП с внешним RC-фильтром не измерялся.
-- Совместная нагрузка LTDC и DMA на шину FMC при быстрых развёртках не мерялась.
-- Ширина полей крупных значений рассчитана для моноширинного шрифта, а крупные
-  значения выводятся шрифтом Montserrat с более широкими цифрами.
-- Аналоговый тракт (защита, делитель, смещение, AC/DC) не изготавливался; вход
-  работает в диапазоне 0…3.3 В.
+- Live mode is not fully validated on real signals.
+- ADC interleaving is not implemented, so the timebase stops at 20 µs/div;
+  single-channel 5.40 MSa/s remains a placeholder.
+- The PWM-DAC spectrum with an external RC filter has not been measured.
+- LTDC + DMA contention on the FMC bus at fast sweeps has not been measured.
+- Large-value field widths were computed for a monospace font, while large
+  values are drawn in Montserrat with wider digits.
+- The analog front end (protection, divider, offset, AC/DC) was not built; the
+  input works over 0…3.3 V.
 
 ---
 
-## Лицензия
+## License
 
-MIT, см. [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
