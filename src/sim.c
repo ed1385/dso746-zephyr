@@ -25,8 +25,24 @@
 
 #define SDRAM_SECTION __attribute__((section(LINKER_DT_NODE_REGION_NAME(DT_NODELABEL(sdram1)))))
 
-static struct dso_frame demo_frame SDRAM_SECTION;
+static struct dso_frame demo_frame[2] SDRAM_SECTION;
+static uint8_t demo_slot;
 static uint32_t rng = 0xA5A5F00D;
+
+/* 4096-entry sine table: the demo at 4096 FFT points used to spend three
+ * sinf() calls per sample - about 10 ms per frame, a fifth of the frame
+ * budget, on the UI thread. A table lookup is a few cycles. */
+#define SIN_N 4096
+static float sin_tab[SIN_N] SDRAM_SECTION;
+static bool sin_ready;
+
+static inline float sin_lut(float ph)          /* ph in turns, any value */
+{
+	float t = ph - floorf(ph);
+	uint32_t i = (uint32_t)(t * SIN_N) & (SIN_N - 1);
+
+	return sin_tab[i];
+}
 
 static inline float noise(float amp)
 {
@@ -38,6 +54,13 @@ struct dso_frame *sim_frame(const struct dso_cfg *cfg)
 {
 	static float breathe;
 	static float duty_ph;
+
+	if (!sin_ready) {
+		for (int i = 0; i < SIN_N; i++) {
+			sin_tab[i] = sinf(2.0f * (float)M_PI * i / SIN_N);
+		}
+		sin_ready = true;
+	}
 
 	breathe += 0.05f;
 	duty_ph += 0.013f;
@@ -79,30 +102,31 @@ struct dso_frame *sim_frame(const struct dso_cfg *cfg)
 	 * origin follows the horizontal position exactly as the hardware does */
 	size_t pre = (cfg->mode == MODE_FFT) ? 0 : acq_pretrigger(n, cfg->hpos_div);
 
+	struct dso_frame *fr = &demo_frame[demo_slot & 1];
+
+	demo_slot++;
+
 	for (size_t i = 0; i < n; i++) {
 		float t = ((float)i - (float)pre) / sr;
-		float ph = 2.0f * (float)M_PI * f0 * t + jit;
+		float turns = f0 * t + jit / (2.0f * (float)M_PI);
 
-		float s1 = sinf(ph) + 0.18f * sinf(3.0f * ph) + 0.07f * sinf(5.0f * ph);
+		float s1 = sin_lut(turns) + 0.18f * sin_lut(3.0f * turns) +
+			   0.07f * sin_lut(5.0f * turns);
 		float v1 = 2048.0f + amp1 * s1 + noise(6.0f);
 
 		/* wrap into [0,1) explicitly: t is negative before the trigger
 		 * point and fmodf would return a negative fraction there */
-		float frac = fmodf(f0 * t + jit / (2.0f * (float)M_PI), 1.0f);
-
-		if (frac < 0.0f) {
-			frac += 1.0f;
-		}
+		float frac = turns - floorf(turns);      /* [0,1), any sign of t */
 		float s2 = (frac < duty) ? 1.0f : -1.0f;
 		float v2 = 2048.0f - 700.0f + amp2 * s2 + noise(5.0f);
 
-		demo_frame.s[0][i] = (uint16_t)(v1 < 0 ? 0 : (v1 > 4095 ? 4095 : v1));
-		demo_frame.s[1][i] = (uint16_t)(v2 < 0 ? 0 : (v2 > 4095 ? 4095 : v2));
+		fr->s[0][i] = (uint16_t)(v1 < 0 ? 0 : (v1 > 4095 ? 4095 : v1));
+		fr->s[1][i] = (uint16_t)(v2 < 0 ? 0 : (v2 > 4095 ? 4095 : v2));
 	}
 
-	demo_frame.n = (uint16_t)n;
-	demo_frame.nch = 2;
-	demo_frame.triggered = true;
-	demo_frame.sample_rate = sr;
-	return &demo_frame;
+	fr->n = (uint16_t)n;
+	fr->nch = 2;
+	fr->triggered = true;
+	fr->sample_rate = sr;
+	return fr;
 }

@@ -41,6 +41,10 @@ LOG_MODULE_REGISTER(acq, LOG_LEVEL_INF);
  * D-cache, which DMA does not see. */
 static uint16_t ring[N_CH][ADC_RING_LEN] __nocache __aligned(32);
 
+/* a frame is extracted from ONE finished half; if this ever fails, the
+ * extraction would read into the half being written */
+BUILD_ASSERT(FRAME_MAX <= ADC_RING_LEN / 2, "frame must fit in half the ring");
+
 /* frame slots are CPU-only, so they live in SDRAM; internal SRAM is reserved
  * for the DMA ring and the stacks */
 static char frame_pool[FRAME_SLOTS * sizeof(struct dso_frame)]
@@ -52,10 +56,10 @@ static K_SEM_DEFINE(half_sem, 0, 1);
 
 static volatile uint8_t ready_half;    /* 0 = lower half, 1 = upper half   */
 static volatile uint32_t overrun_cnt;
+static volatile uint8_t discard_halves;  /* halves still holding old-rate samples */
 static struct dso_cfg cfg_snapshot;
 static bool trig_armed = true;
 static float cur_sample_rate = 1.0e6f;
-static uint32_t last_trig_ms;
 static uint32_t last_free_ms;
 
 /* ---------------------------------------------------------------- clocks */
@@ -167,6 +171,11 @@ void acq_apply_cfg(const struct dso_cfg *cfg)
 
 	LL_TIM_SetAutoReload(TIM2, arr);
 	LL_TIM_GenerateEvent_UPDATE(TIM2);
+	/* the ring keeps running: the half being written and the next one
+	 * still hold samples taken at the previous rate. A frame built from
+	 * them would carry the new rate with old spacing - a one-frame flash
+	 * of wrong time scale. Skip them. */
+	discard_halves = 2;
 	LOG_INF("timebase %.1f us/div, %u Sa/s, ARR %u",
 		(double)(tdiv_tab[idx] * 1e6f), (unsigned)cur_sample_rate, arr);
 }
@@ -208,9 +217,18 @@ static void acq_thread(void *a, void *b, void *c)
 	while (true) {
 		k_sem_take(&half_sem, K_FOREVER);
 
-		ui_lock();
-		struct dso_cfg cfg = *ui_cfg();
+		/* copy only what a sweep needs, under the lock for as short a
+		 * time as possible: this runs up to 430 times a second */
+		struct dso_cfg cfg;
 
+		ui_lock();
+		cfg.running = ui_cfg()->running;
+		cfg.mode = ui_cfg()->mode;
+		cfg.tdiv_idx = ui_cfg()->tdiv_idx;
+		cfg.hpos_div = ui_cfg()->hpos_div;
+		cfg.trig = ui_cfg()->trig;
+		cfg.fft = ui_cfg()->fft;
+		cfg.ch[1].on = ui_cfg()->ch[1].on;
 		ui_unlock();
 
 		if (!cfg.running && cfg.mode != MODE_FFT) {
@@ -233,14 +251,16 @@ static void acq_thread(void *a, void *b, void *c)
 						    : acq_pretrigger(want, cfg.hpos_div);
 		uint8_t src = cfg.trig.source < N_CH ? cfg.trig.source : 0;
 
-		/* leave room so the extracted window never runs into the half
-		 * the DMA is currently writing */
+		/* the whole window [trig - pre, trig - pre + want) must lie
+		 * inside the half that is finished: pre-trigger samples before
+		 * `base` would come from the half the DMA is writing right now */
+		size_t search_begin = base + pre + 1;
 		size_t search_end = base + half - (want - pre);
 		int trig = -1;
 
-		if (cfg.mode == MODE_SCOPE && search_end > base + 1) {
+		if (cfg.mode == MODE_SCOPE && search_end > search_begin) {
 			trig = acq_find_trigger(ring[src], ADC_RING_LEN,
-						base + 1, search_end,
+						search_begin, search_end,
 						level_to_code(&cfg),
 						cfg.trig.hyst_lsb,
 						cfg.trig.slope, &trig_armed);
@@ -271,8 +291,6 @@ static void acq_thread(void *a, void *b, void *c)
 			} else {
 				continue;                          /* NORMAL: wait */
 			}
-		} else {
-			last_trig_ms = now;
 		}
 
 		/* holdoff: ignore triggers that arrive too soon after the last */
@@ -315,6 +333,11 @@ static void acq_thread(void *a, void *b, void *c)
 
 K_THREAD_STACK_DEFINE(acq_stack, 2048);
 static struct k_thread acq_thread_data;
+
+uint32_t acq_overruns(void)
+{
+	return overrun_cnt;
+}
 
 struct dso_frame *acq_take_frame(int timeout_ms)
 {
@@ -377,8 +400,13 @@ int acq_init(void)
 	adc_setup(ADC3, LL_ADC_CHANNEL_8);
 	k_busy_wait(10);                       /* tSTAB after ADC enable */
 
+	/* Highest PREEMPTIBLE priority, not cooperative. A cooperative thread
+	 * that blocks on the settings mutex boosts the UI thread to cooperative
+	 * while it holds the lock, and then nothing - flush, input, logging -
+	 * can run until the lock is released. Preemptible keeps the trigger
+	 * search prompt without ever freezing the rest of the system. */
 	k_thread_create(&acq_thread_data, acq_stack, K_THREAD_STACK_SIZEOF(acq_stack),
-			acq_thread, NULL, NULL, NULL, -2, 0, K_NO_WAIT);
+			acq_thread, NULL, NULL, NULL, 1, 0, K_NO_WAIT);
 	k_thread_name_set(&acq_thread_data, "acq");
 
 	LOG_INF("acquisition ready, max %u Sa/s per channel", ADC_MAX_SPS);

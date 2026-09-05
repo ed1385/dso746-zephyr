@@ -35,7 +35,9 @@
 LOG_MODULE_REGISTER(gen, LOG_LEVEL_INF);
 
 #define TIM3_CLK_HZ 108000000U
-#define TABLE_MAX   256
+#define TABLE_MAX   4096        /* 8 KB, non-cached SRAM; keeps the carrier
+				 * at full rate down to ~25 Hz instead of
+				 * dropping it into the filter passband */
 #define TABLE_MIN   10          /* the spec rule: >= 10 DAC updates per period */
 
 /*
@@ -160,14 +162,16 @@ void gen_apply(const struct dso_gen *g)
 		len = TABLE_MIN;             /* above 42 kHz the sine degrades */
 	}
 
-	/* update rate = freq * len; a prescaler trims the low frequencies
-	 * where even 256 points leave the carrier far above what is needed */
+	/* update rate = freq * len. Only when even TABLE_MAX points cannot
+	 * absorb the frequency does the prescaler slow the carrier - and
+	 * that is now below ~25 Hz, where the filter passband is irrelevant.
+	 * Closed form, not a search: psc = clk / ((arr+1) * upd) - 1. */
 	float upd = g->freq_hz * (float)len;
-	uint32_t psc = 0;
+	float pf = (float)TIM3_CLK_HZ / ((arr + 1.0f) * upd);
+	uint32_t psc = pf > 1.0f ? (uint32_t)(pf + 0.5f) - 1U : 0U;
 
-	while (upd > 0.0f && (float)TIM3_CLK_HZ / ((psc + 1.0f) * (arr + 1.0f)) > upd
-	       && psc < 0xFFFF) {
-		psc++;
+	if (psc > 0xFFFF) {
+		psc = 0xFFFF;
 	}
 
 	build_table(g, arr, len);

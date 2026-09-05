@@ -78,7 +78,7 @@ static void make_window(uint8_t kind, uint16_t n)
 void dsp_spectrum(const uint16_t *s, size_t n, uint8_t window,
 		  float *out_db, size_t cols)
 {
-	size_t idx = 0;
+	size_t idx = fft_size_cnt;      /* sentinel: not found */
 
 	for (size_t i = 0; i < fft_size_cnt; i++) {
 		if (fft_size_tab[i] == n) {
@@ -86,9 +86,12 @@ void dsp_spectrum(const uint16_t *s, size_t n, uint8_t window,
 			break;
 		}
 	}
-	if (!rfft_ok[idx] || n > FFT_MAX) {
+	/* n must be exactly one of the supported lengths and fit the tables;
+	 * a stale length from a mode change lands here and draws a floor
+	 * instead of transforming a mismatched buffer */
+	if (idx == fft_size_cnt || !rfft_ok[idx] || n > FFT_MAX) {
 		for (size_t c = 0; c < cols; c++) {
-			out_db[c] = -120.0f;
+			out_db[c] = -140.0f;
 		}
 		return;
 	}

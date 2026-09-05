@@ -186,6 +186,7 @@ void acq_apply_cfg(const struct dso_cfg *cfg);   /* reprograms TIM2/ADC     */
 void acq_start(void);
 void acq_stop(void);
 struct dso_frame *acq_take_frame(int timeout_ms); /* NULL if none           */
+uint32_t acq_overruns(void);                       /* ISR ran ahead of acq   */
 void acq_release_frame(struct dso_frame *f);
 
 int  gen_init(void);

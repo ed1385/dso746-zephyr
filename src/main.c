@@ -45,6 +45,21 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
 static float spec[WAVE_COLS];
 
+#ifdef CONFIG_THREAD_STACK_INFO
+static void stack_report(const struct k_thread *t, void *arg)
+{
+	ARG_UNUSED(arg);
+	size_t unused = 0;
+
+	if (k_thread_stack_space_get(t, &unused) == 0) {
+		const char *n = k_thread_name_get((k_tid_t)t);
+
+		LOG_INF("  stack %-10s free %5u of %5u", n ? n : "?",
+			(unsigned)unused, (unsigned)t->stack_info.size);
+	}
+}
+#endif
+
 /*
  * B1 USER key (PI11) toggles demo <-> live. It arrives through the Zephyr
  * input subsystem as INPUT_KEY_0, the same path the touch panel uses, so the
@@ -96,12 +111,19 @@ int main(void)
 	uint32_t frames = 0, dropped = 0, last_stat = next_tick;
 
 	while (true) {
+		/*
+		 * Input first, always. lv_timer_handler() samples the touch
+		 * panel; if a frame ever takes longer than a tap, the press and
+		 * the release both fall between two samples and the tap is lost.
+		 * So the sampling cadence is fixed at TICK_MS and is never
+		 * skipped, and the frame work is what yields, not the input.
+		 */
+		ui_service();
+		lv_timer_handler();
+
 		uint32_t now_ms = k_uptime_get_32();
 
-		/* ---- fast lane: input and widget animations only ---------- */
 		if ((int32_t)(now_ms - next_frame) < 0) {
-			ui_service();          /* deferred requests, timeouts */
-			lv_timer_handler();
 			next_tick += TICK_MS;
 			int32_t s2 = (int32_t)(next_tick - k_uptime_get_32());
 
@@ -125,9 +147,19 @@ int main(void)
 			while ((stale = acq_take_frame(0)) != NULL) {
 				acq_release_frame(stale);
 			}
+			/* Generate from a COPY of the settings, outside the mutex.
+			 * Holding it during ~10 ms of trigonometry let the acq
+			 * thread (which takes the same mutex 430 times a second
+			 * at the widest span) block on it, and priority
+			 * inheritance then made this thread cooperative for the
+			 * whole window - a demo-only condition the live path
+			 * never creates. */
+			static struct dso_cfg snap;
+
 			ui_lock();
-			f = sim_frame(ui_cfg());
+			snap = *ui_cfg();
 			ui_unlock();
+			f = sim_frame(&snap);
 		} else {
 			f = acq_take_frame(0);     /* never block the UI thread */
 			owned = (f != NULL);
@@ -137,24 +169,6 @@ int main(void)
 		const float *sp = NULL;
 
 		if (f) {
-			ui_lock();
-			uint8_t mode = ui_cfg()->mode;
-			uint8_t fsrc = ui_cfg()->fft.source;
-			uint8_t win = ui_cfg()->fft.window;
-			bool meas_on = ui_cfg()->meas_on;
-
-			ui_unlock();
-
-			if (mode == MODE_FFT) {
-				uint8_t ch = fsrc < f->nch ? fsrc : 0;
-
-				dsp_spectrum(f->s[ch], f->n, win, spec, WAVE_COLS);
-				sp = spec;
-			} else if (meas_on) {
-				dsp_measure(f->s[0], f->n, f->sample_rate,
-					    ADC_VREF / ADC_FULL_SCALE, 2048.0f, &m);
-			}
-
 			/* Drain anything that piled up while we were drawing and
 			 * keep only the newest: showing a stale frame is worse
 			 * than showing fewer of them. */
@@ -166,6 +180,34 @@ int main(void)
 					f = newer;
 					dropped++;
 				}
+			}
+
+
+			ui_lock();
+			uint8_t mode = ui_cfg()->mode;
+			uint8_t fsrc = ui_cfg()->fft.source;
+			uint8_t win = ui_cfg()->fft.window;
+			bool meas_on = ui_cfg()->meas_on;
+
+			ui_unlock();
+
+			if (mode == MODE_FFT) {
+				uint8_t ch = fsrc < f->nch ? fsrc : 0;
+				bool len_ok = false;
+
+				for (size_t i = 0; i < fft_size_cnt; i++) {
+					if (fft_size_tab[i] == f->n) {
+						len_ok = true;
+						break;
+					}
+				}
+				if (len_ok) {
+					dsp_spectrum(f->s[ch], f->n, win, spec, WAVE_COLS);
+					sp = spec;
+				}
+			} else if (meas_on) {
+				dsp_measure(f->s[0], f->n, f->sample_rate,
+					    ADC_VREF / ADC_FULL_SCALE, 2048.0f, &m);
 			}
 
 			ui_on_frame(f, &m, sp);
@@ -182,14 +224,14 @@ int main(void)
 		uint32_t now = k_uptime_get_32();
 
 		if (now - last_stat >= 5000U) {
-			LOG_INF("%u frames/s drawn, %u dropped, lvgl %u ms",
-				frames / 5U, dropped / 5U,
-				(unsigned)(k_uptime_get_32() - now));
+			LOG_INF("%u frames/s drawn, %u dropped, %u acq overruns",
+				frames / 5U, dropped / 5U, (unsigned)acq_overruns());
+#ifdef CONFIG_THREAD_STACK_INFO
+			k_thread_foreach(stack_report, NULL);
+#endif
 			frames = dropped = 0;
 			last_stat = now;
 		}
-
-		lv_timer_handler();
 
 		if ((int32_t)(k_uptime_get_32() - next_frame) > 0) {
 			next_frame = k_uptime_get_32();  /* we are behind: resync */

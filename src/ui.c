@@ -95,11 +95,14 @@ static enum ctl param_ctl(const struct param *p)
 	}
 }
 
+enum gkind { GK_OTHER, GK_CH1, GK_CH2, GK_TRIG, GK_TIME };
+
 struct group {
 	const char *name;
 	uint32_t color;
 	const struct param *p;
 	uint8_t np;
+	uint8_t kind;                /* what drag and visibility key on   */
 };
 
 static struct dso_cfg cfg;
@@ -204,10 +207,11 @@ static const struct param p_gpwm[] = {
 	{ "PWM DUTY",   P_FLOAT, F_PCT, &cfg.gen.pwm_duty_pct, NULL, 0, 0, 100, 0.5f },
 };
 
-#define G(n, c, arr) { n, c, arr, sizeof(arr) / sizeof(arr[0]) }
+#define G(n, c, arr) { n, c, arr, sizeof(arr) / sizeof(arr[0]), GK_OTHER }
+#define GK(n, c, arr, k) { n, c, arr, sizeof(arr) / sizeof(arr[0]), k }
 static const struct group groups[MODE_COUNT][6] = {
-	{ G("CH1", C_CH1, p_ch1), G("CH2", C_CH2, p_ch2),
-	  G("TIME", C_LINE, p_time), G("TRIG", C_CH1, p_trig),
+	{ GK("CH1", C_CH1, p_ch1, GK_CH1), GK("CH2", C_CH2, p_ch2, GK_CH2),
+	  GK("TIME", C_LINE, p_time, GK_TIME), GK("TRIG", C_CH1, p_trig, GK_TRIG),
 	  G("MEAS", C_LINE, p_meas), G("DISP", C_LINE, p_disp) },
 	{ G("SRC", C_CH2, p_fsrc), G("SCALE", C_LINE, p_fscale),
 	  G("MARK", C_CH1, p_fmark), G("WFALL", C_LINE, p_fwf),
@@ -230,9 +234,9 @@ static bool group_visible(uint8_t g)
 	}
 	if (cfg.mode == MODE_SCOPE && cfg.xy_mode) {
 		/* XY has no time axis and no trigger */
-		const char *n = groups[cfg.mode][g].name;
+		uint8_t k = groups[cfg.mode][g].kind;
 
-		if (strcmp(n, "TIME") == 0 || strcmp(n, "TRIG") == 0) {
+		if (k == GK_TIME || k == GK_TRIG) {
 			return false;
 		}
 	}
@@ -820,7 +824,10 @@ static void render_xy(struct dso_frame *f)
 	phos_compose();
 }
 
-static uint16_t heat(uint8_t v, uint8_t pal)
+static uint16_t heat_lut[3][256];
+static bool heat_ready;
+
+static uint16_t heat_calc(uint8_t v, uint8_t pal)
 {
 	uint32_t r, g, b;
 
@@ -869,6 +876,16 @@ static void render_fft(void)
 	}
 
 	if (cfg.fft.waterfall) {
+		if (!heat_ready) {
+			for (int p2 = 0; p2 < 3; p2++) {
+				for (int v = 0; v < 256; v++) {
+					heat_lut[p2][v] = heat_calc((uint8_t)v, (uint8_t)p2);
+				}
+			}
+			heat_ready = true;
+		}
+		const uint16_t *lut = heat_lut[cfg.fft.palette < 3 ? cfg.fft.palette : 0];
+
 		/* scroll one line down, newest on top */
 		memmove(&wfall[1][0], &wfall[0][0],
 			(size_t)(WAVE_H / 2 - 1) * WAVE_W);
@@ -879,7 +896,7 @@ static void render_fft(void)
 				break;
 			}
 			for (int x = 0; x < WAVE_W; x++) {
-				cbuf[dy * WAVE_W + x] = heat(wfall[y][x], cfg.fft.palette);
+				cbuf[dy * WAVE_W + x] = lut[wfall[y][x]];
 			}
 		}
 	}
@@ -1406,11 +1423,11 @@ static void canvas_cb(lv_event_t *e)
 	} else if (abs(dy) >= abs(dx)) {
 		const struct group *g = &groups[cfg.mode][sel_group];
 
-		if (strcmp(g->name, "TRIG") == 0) {
+		if (g->kind == GK_TRIG) {
 			cfg.trig.level_v -= (float)dy / DIV_Y *
 					    vdiv_tab[cfg.ch[cfg.trig.source].vdiv_idx];
 		} else {
-			uint8_t ch = (strcmp(g->name, "CH2") == 0) ? 1 : 0;
+			uint8_t ch = (g->kind == GK_CH2) ? 1 : 0;
 
 			cfg.ch[ch].offset_div -= (float)dy / DIV_Y;
 		}
@@ -1530,7 +1547,7 @@ static void key_cb(lv_event_t *e)
 	} else if (id == 1) {
 		cfg.mode = (uint8_t)((cfg.mode + 1) % MODE_COUNT);
 		sel_group = 0;
-		sel_param = 0;
+		sel_param = first_visible(&groups[cfg.mode][0]);
 		if (cfg.mode == MODE_SCOPE) {
 			scope_defaults();
 		}
@@ -1543,7 +1560,7 @@ static void key_cb(lv_event_t *e)
 
 			sel_group = g;
 			if (!same) {
-				sel_param = 0;
+				sel_param = first_visible(&groups[cfg.mode][g]);
 			}
 			/* same key while a page is open closes it; while adjusting
 			 * it reopens the page; otherwise it opens the page */
@@ -1956,6 +1973,10 @@ int ui_init(void)
 	for (int i = 0; i < 8; i++) {
 		dots[i] = panel(vb, 4, 6 + i * 6, 4, 4, C_LINE);
 		lv_obj_set_style_radius(dots[i], 2, 0);
+		/* a plain object is clickable by default: a tap exactly on a
+		 * dot was swallowed here instead of reaching the value block */
+		lv_obj_remove_flag(dots[i], LV_OBJ_FLAG_CLICKABLE);
+		lv_obj_add_flag(dots[i], LV_OBJ_FLAG_EVENT_BUBBLE);
 	}
 	lbl_par = label(vb, 14, 3, 114, &lv_font_unscii_8, C_DIM, LV_TEXT_ALIGN_LEFT);
 	lbl_val = label(vb, 36, 16, 150, &lv_font_montserrat_20, C_TXT,
@@ -2006,21 +2027,36 @@ void ui_sync(const struct dso_meas *m, float sr)
 	} else if (!param_visible(&groups[cfg.mode][sel_group].p[sel_param])) {
 		sel_param = first_visible(&groups[cfg.mode][sel_group]);
 	}
+	ui_unlock();
 	update_status(m, sr);
 	refresh_keys();
 	refresh_bar();
-	ui_unlock();
 }
 
 void ui_on_frame(struct dso_frame *f, const struct dso_meas *m,
 		 const float *spec)
 {
+	/* The mutex protects cfg against the acq thread, which only ever
+	 * WRITES cfg.running. Rendering reads cfg from the UI thread, the
+	 * only writer of everything else, so it does not need the lock - and
+	 * holding it for a 10 ms render let priority inheritance lift this
+	 * thread to the acq thread's cooperative priority, starving input. */
 	ui_lock();
 	if (spec) {
 		memcpy(spec_db, spec, sizeof(spec_db));
 	}
+	ui_unlock();
 
 	if (f) {
+		/* every render path below trusts f->n; a length beyond the
+		 * buffer (seen only transiently at a mode switch) is clamped
+		 * here, once, so no path can index past phos/frozen/cbuf */
+		if (f->n > FRAME_MAX) {
+			f->n = FRAME_MAX;
+		}
+		if (f->nch > N_CH) {
+			f->nch = N_CH;
+		}
 		last_frame_ms = k_uptime_get_32();
 		if (m) {
 			last_meas = *m;
@@ -2036,8 +2072,10 @@ void ui_on_frame(struct dso_frame *f, const struct dso_meas *m,
 
 		if (f && cfg.running) {
 			memcpy(&frozen, f, offsetof(struct dso_frame, s));
+			uint16_t cn = f->n <= FRAME_MAX ? f->n : FRAME_MAX;
+
 			for (uint8_t ch = 0; ch < f->nch && ch < N_CH; ch++) {
-				memcpy(frozen.s[ch], f->s[ch], sizeof(uint16_t) * f->n);
+				memcpy(frozen.s[ch], f->s[ch], sizeof(uint16_t) * cn);
 			}
 			frozen_valid = true;
 			src = f;
@@ -2075,8 +2113,6 @@ void ui_on_frame(struct dso_frame *f, const struct dso_meas *m,
 			lv_obj_add_flag(banner, LV_OBJ_FLAG_HIDDEN);
 		}
 	}
-
-	ui_unlock();
 
 	if (!popup_open) {
 		lv_obj_invalidate(canvas);   /* the only area that changes every frame */
