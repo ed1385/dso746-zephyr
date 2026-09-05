@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * DSO-746 - entry point.
  *
  * Thread map (priority in brackets, lower number = higher priority):

@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * DSO-746 user interface, LVGL 9.
  *
  * Geometry is the one that was approved in the HTML mockup and it is fixed:

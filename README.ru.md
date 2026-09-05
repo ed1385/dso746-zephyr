@@ -336,6 +336,12 @@ tests/host/      тесты алгоритмов, собираются на хо
 
 ---
 
+## Автор
+
+**Eduard** — https://github.com/ed1385/dso746-zephyr
+
+---
+
 ## Лицензия
 
 MIT, см. [LICENSE](LICENSE).

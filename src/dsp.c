@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * Spectrum analysis with CMSIS-DSP. arm_rfft_fast_f32 on a 216 MHz Cortex-M7
  * with FPU takes well under a millisecond at 2048 points, so the spectrum is
  * limited by the 20 Hz display rate, not by the maths.

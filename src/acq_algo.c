@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * Trigger search, pre-trigger extraction and column reduction.
  * No hardware here on purpose: tests/host compiles this file directly.
  */

@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * Host tests for the hardware-free parts. Build and run:
  *     cc -I../../src -O2 -Wall -Wextra test_algo.c ../../src/acq_algo.c \
  *        ../../src/dsp_math.c -lm -o test_algo && ./test_algo

@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * Demo mode: synthesised signals, no hardware involved.
  *
  * The board boots into this mode so the panel is alive and every screen looks

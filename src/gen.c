@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * Signal generator on PB4 (Arduino D3, TIM3_CH1).
  *
  * The board has no usable DAC pin: UM1907 shows PA4 = DCMI_HSYNC (routed only

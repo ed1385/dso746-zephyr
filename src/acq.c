@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * Acquisition: TIM2 TRGO -> ADC1 (CH1, PA0) and ADC3 (CH2, PF10) -> DMA2
  * circular, half/full interrupts. Written on the LL headers on purpose:
  * Zephyr's ADC driver only offers one-shot adc_read() and cannot do

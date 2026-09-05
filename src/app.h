@@ -1,4 +1,9 @@
 /*
+ * Author:  Eduard
+ * Project: DSO-746 - oscilloscope, FFT analyzer and signal generator
+ * Repo:    https://github.com/ed1385/dso746-zephyr
+ * License: MIT
+ *
  * DSO-746 - demo oscilloscope / spectrum analyser / generator
  * Shared types. Everything the UI can change lives in dso_cfg_t; the
  * acquisition and generator modules read it under one mutex.

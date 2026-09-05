@@ -291,6 +291,12 @@ algorithms, the sweep planner, the pin map (UM1907), the DMA stream numbers
 
 ---
 
+## Author
+
+**Eduard** — https://github.com/ed1385/dso746-zephyr
+
+---
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
